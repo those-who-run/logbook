@@ -1,5 +1,6 @@
 # Who must approve a change, once `main`'s ruleset requires code-owner review
-# (scripts/protect-repo.sh --code-owners). GitHub reads this file from the base
-# branch, so a PR can't change who approves it. The last matching line wins, so
-# stricter paths go below this one.
+# (`code_owners` in those-who-run/.github's scripts/repos.json, applied by its
+# scripts/protect-repo.sh). GitHub reads this file from the base branch, so a PR
+# can't change who approves it. The last matching line wins, so stricter paths
+# go below this one.
 * @ciaranRoche
