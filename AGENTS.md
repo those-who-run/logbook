@@ -22,8 +22,11 @@ and `Part of those-who-run/paddock#N` otherwise, as paddock's `AGENTS.md` says.
 link and anchor resolves, the guard and settings in `.claude/` are
 `those-who-run/.github`'s `agent/` at the commit CI pins, the external commit
 hooks are pinned by commit SHA, and the tests of those checks. It needs
-`python3`, `pre-commit` and the network. Docs change in the same PR as what
-they describe.
+`python3`, `pre-commit` and the network.
+
+A change also carries a test for each acceptance criterion of its issue,
+docs changed in the same PR as what they describe, and a recording that
+pins a behaviour where one applies.
 
 It holds no language code yet. The code, and this file's rules for its
 language (tool versions, formatting, generated files, where dependencies
