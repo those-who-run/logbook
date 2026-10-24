@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(~/.kube/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)",
+      "Read(~/.config/gcloud/**)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.config/helm/**)",
+      "Read(~/.docker/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.config/containers/auth.json)",
+      "Read(//run/user/*/containers/auth.json)",
+      "Read(~/.netrc)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(~/.claude.json)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/id_rsa*)",
+      "Read(**/id_ed25519*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
+      "Edit(~/.kube/**)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/.aws/**)",
+      "Edit(~/.config/gcloud/**)",
+      "Edit(~/.gnupg/**)",
+      "Edit(~/.config/helm/**)",
+      "Edit(~/.docker/**)",
+      "Edit(~/.config/gh/**)",
+      "Edit(~/.config/containers/auth.json)",
+      "Edit(//run/user/*/containers/auth.json)",
+      "Edit(~/.netrc)",
+      "Edit(~/.claude/.credentials.json)",
+      "Edit(~/.claude.json)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)",
+      "Edit(**/id_rsa*)",
+      "Edit(**/id_ed25519*)"
+    ],
+    "ask": [
+      "Edit(**/.claude/settings.json)",
+      "Edit(**/.claude/settings.local.json)",
+      "Edit(**/.claude/guard.json)",
+      "Edit(**/.claude/hooks/**)"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/guard.py"],
+            "timeout": 10,
+            "onFailure": "block",
+            "statusMessage": "Checking the command against .claude/hooks/guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}
