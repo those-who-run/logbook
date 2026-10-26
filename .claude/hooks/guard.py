@@ -833,6 +833,64 @@ def secret_args(name: str, args: list[str], env: dict[str, str]) -> Verdict:
     return worst([secret_path(a, env) for a in args])
 
 
+# The maintainer's own jobs in those-who-run/.github: the make targets in its Makefile's
+# "Maintainer only" group and the scripts behind them. They run with the gh login of
+# whoever runs them, change repository settings and the organisation's project board,
+# and one stores the release App's private key, so agents never run them, not even the
+# read-only checks. Reading or linting a script is fine; running it is not.
+MAINTAINER_ONLY = (
+    "it is the maintainer's own job, run with his gh login: it reads or changes "
+    "repository settings, the project board or the release App's key"
+)
+MAINTAINER_TARGETS = {
+    "board", "board-check", "protect", "protect-check", "envs", "envs-check", "new-repo-check",
+}  # fmt: skip
+MAINTAINER_SCRIPTS = {"protect-repo.sh", "board-sync.sh", "release-envs.sh", "new-repo-check.sh"}
+# make's options that take a separate value.
+MAKE_WITH_VALUE = {
+    "-C", "-f", "-I", "-o", "-W", "-E", "--directory", "--file", "--makefile",
+    "--include-dir", "--old-file", "--assume-old", "--new-file", "--assume-new", "--what-if",
+    "--eval",
+}  # fmt: skip
+
+
+def make_dry_run(args: list[str]) -> bool:
+    """Only `make -n <target>`, exactly. Options that take a value (`-o -n`, `-C -n`)
+    make any reading of a longer command a guess, so nothing else counts as a dry
+    run; `make --dry-run board` or `make -nk board` is blocked like `make board`."""
+    return len(args) == 2 and args[0] == "-n" and not args[1].startswith("-") and "=" not in args[1]
+
+
+def make_rule(args: list[str], env: dict[str, str]) -> Verdict:
+    if make_dry_run(args):
+        return ALLOWED
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in MAKE_WITH_VALUE:
+            i += 2
+            continue
+        if not a.startswith("-") and not ASSIGNMENT.match(a) and a in MAINTAINER_TARGETS:
+            return block("maintainer-only", f"make {a}: {MAINTAINER_ONLY}")
+        i += 1
+    return ALLOWED
+
+
+def maintainer_script(path: str) -> Verdict:
+    """Running one of the maintainer's scripts, by its path or through a shell."""
+    name = os.path.basename(path)
+    if name in MAINTAINER_SCRIPTS:
+        return block("maintainer-only", f"{name}: {MAINTAINER_ONLY}")
+    return ALLOWED
+
+
+def script_rule(name: str):
+    def rule(args: list[str], env: dict[str, str]) -> Verdict:
+        return maintainer_script(name)
+
+    return rule
+
+
 # Program name -> rule. Programs are matched by their base name, so `/usr/bin/git`
 # is `git`.
 RULES = {
@@ -845,6 +903,9 @@ RULES = {
     "kubectl": kubectl_rule,
     "oc": kubectl_rule,
     "helm": helm_rule,
+    "make": make_rule,
+    "gmake": make_rule,
+    **{name: script_rule(name) for name in MAINTAINER_SCRIPTS},
 }
 
 
@@ -1238,6 +1299,8 @@ def check_argv(
         return ALLOWED
     if name == "eval":
         return check(" ".join(args), depth + 1)
+    if name in ("source", ".") and args:
+        return worst([secret_args(name, args, env), maintainer_script(args[0])])
     if name == "env":
         return check_env(args, env, cmd, shell_env, text, depth)
     if name in SHELLS:
@@ -1323,9 +1386,21 @@ def check_env(
     return ALLOWED
 
 
+def shell_names_maintainer_script(args: list[str]) -> Verdict:
+    """A shell given one of the maintainer's scripts anywhere in its arguments is
+    blocked, unless the whole command is `bash -n <script>` (or `sh -n`), which only
+    reads it. Reading the shell's options instead is a guess: a cluster such as
+    `-eo pipefail` takes the next word as a value, so the script isn't where it seems."""
+    named = [a for a in args if os.path.basename(a) in MAINTAINER_SCRIPTS]
+    if not named or (len(args) == 2 and args[0] == "-n"):
+        return ALLOWED
+    return maintainer_script(named[0])
+
+
 def check_shell(args: list[str], cmd: Command, text: str, depth: int) -> Verdict:
     """`bash -c '...'` checks the script; `bash <<EOF` checks the here-document; a
     shell reading stdin from a pipe can't be followed."""
+    script = shell_names_maintainer_script(args)
     has_c, i = False, 0
     while i < len(args):
         a = args[i]
@@ -1341,9 +1416,12 @@ def check_shell(args: list[str], cmd: Command, text: str, depth: int) -> Verdict
             break
         i += 1
     if has_c:
-        return check(args[i], depth + 1) if i < len(args) else ALLOWED
-    if i < len(args):
-        return ALLOWED  # a script file: what it runs is out of sight
+        # Which word is the command string depends on the options before it (in
+        # `bash -co pipefail '...'` it is the second), so every word that isn't an
+        # option is checked as one.
+        return worst([script, *(check(a, depth + 1) for a in args if not a.startswith(("-", "+")))])
+    if i < len(args) or script.level:
+        return script  # a script file: what it runs is out of sight, but not its name
     if cmd.stdin_scripts:
         return worst([check(s, depth + 1) for s in cmd.stdin_scripts])
     return ask_if_sensitive(text, "a shell reads commands from a pipe")
