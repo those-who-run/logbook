@@ -251,3 +251,63 @@ func TestServeReportsAListenerThatFails(t *testing.T) {
 		t.Errorf("serve on a closed listener = %v, want an error", err)
 	}
 }
+
+func TestShutdownTakesTheServerClosedAsAClean(t *testing.T) {
+	for _, servedErr := range []error{http.ErrServerClosed, nil} {
+		srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+		served := make(chan error, 1)
+		served <- servedErr
+		if err := shutdown(t.Context(), srv, served); err != nil {
+			t.Errorf("shutdown with Serve returning %v = %v, want nil", servedErr, err)
+		}
+	}
+}
+
+func TestShutdownReturnsWhatServeFailedWith(t *testing.T) {
+	// Serve can fail on its own as ctx is done, and serve's select then takes ctx.
+	failed := errors.New("accept: too many open files")
+	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	served := make(chan error, 1)
+	served <- failed
+	err := shutdown(t.Context(), srv, served)
+	if !errors.Is(err, failed) || !strings.HasPrefix(err.Error(), "serve: ") {
+		t.Errorf("shutdown = %v, want the serve error %q", err, failed)
+	}
+}
+
+func TestShutdownReturnsBothItsOwnAndServesErrors(t *testing.T) {
+	// A request still in flight when the grace period is over makes Shutdown fail.
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := newServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-release
+	}), NewLogger(io.Discard, slog.LevelInfo))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- srv.Serve(ln) }()
+	answered := make(chan int, 1)
+	go func() { answered <- get(t, "http://"+ln.Addr().String()+"/") }()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request did not reach the handler in 10 s")
+	}
+
+	failed := errors.New("accept: too many open files")
+	served := make(chan error, 1)
+	served <- failed
+	over, cancel := context.WithCancel(t.Context())
+	cancel()
+	err = shutdown(over, srv, served)
+	close(release)
+	<-answered
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, failed) {
+		t.Errorf("shutdown = %v, want both the shutdown and the serve error", err)
+	}
+	if err := <-stopped; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("Serve = %v after Shutdown, want http.ErrServerClosed", err)
+	}
+}

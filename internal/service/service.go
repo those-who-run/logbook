@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -112,12 +113,23 @@ func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version st
 	}
 	logger.InfoContext(ctx, "shutting down")
 	// ctx is already done, so the grace period needs a context of its own.
-	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
+	grace, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownGrace)
 	defer cancel()
-	err := srv.Shutdown(shutdown)
-	<-served // http.ErrServerClosed, once Shutdown is called
-	if err != nil {
-		return fmt.Errorf("shutdown: %w", err)
+	return shutdown(grace, srv, served)
+}
+
+// shutdown stops srv gracefully within ctx and waits for its Serve to return the
+// error that served carries. Once Shutdown is called Serve returns
+// http.ErrServerClosed, which is a clean stop. Anything else is an error Serve hit
+// on its own, as ctx was done, and is not lost: it is returned with any error from
+// Shutdown.
+func shutdown(ctx context.Context, srv *http.Server, served <-chan error) error {
+	var errs []error
+	if err := srv.Shutdown(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("shutdown: %w", err))
 	}
-	return nil
+	if err := <-served; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errs = append(errs, fmt.Errorf("serve: %w", err))
+	}
+	return errors.Join(errs...)
 }
