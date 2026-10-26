@@ -63,16 +63,26 @@ func (s *Store) WriteLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 	if err := s.sessionExists(ctx, src, lap.GetSessionId()); err != nil {
 		return err
 	}
+	_, err := s.writeLap(ctx, src, lap, frames, nil)
+	return err
+}
+
+// writeLap writes lap's file from frames, then its row, and runs also, when it is
+// not nil, in the row's transaction. It returns the frames the file holds. The
+// caller holds s.mu and has checked the session.
+func (s *Store) writeLap(ctx context.Context, src string, lap *eventsv1.LapCompleted, frames []*telemetryv1.Frame,
+	also func(*sql.Tx) error,
+) (int, error) {
 	racing := racingFrames(frames, lap.GetFirstSeq(), lap.GetLastSeq())
 	rel := filepath.Join(lapsDir, src, lap.GetSessionId(), fmt.Sprintf("lap-%03d.parquet", lap.GetLap()))
 	// The file before its row (v1 #148): a reader that finds the row finds the file.
 	if err := s.writeLapFile(ctx, filepath.Join(s.dir, rel), racing); err != nil {
-		return fmt.Errorf("store: lap %d of %s/%s: %w", lap.GetLap(), src, lap.GetSessionId(), err)
+		return 0, fmt.Errorf("store: lap %d of %s/%s: %w", lap.GetLap(), src, lap.GetSessionId(), err)
 	}
-	if err := s.writeLapRow(ctx, src, lap, racing, filepath.ToSlash(rel)); err != nil {
-		return fmt.Errorf("store: lap %d of %s/%s: %w", lap.GetLap(), src, lap.GetSessionId(), err)
+	if err := s.writeLapRow(ctx, src, lap, racing, filepath.ToSlash(rel), also); err != nil {
+		return 0, fmt.Errorf("store: lap %d of %s/%s: %w", lap.GetLap(), src, lap.GetSessionId(), err)
 	}
-	return nil
+	return len(racing), nil
 }
 
 // EndSession records how ev's session ended, at endedAt: the time the event was
@@ -237,7 +247,9 @@ func syncFile(path string) error {
 // writeLapRow upserts lap's row and brings its session's totals up to date, in one
 // transaction. recorded_at is kept from the first write, so a repeat leaves the row
 // as it was.
-func (s *Store) writeLapRow(ctx context.Context, src string, lap *eventsv1.LapCompleted, frames []*telemetryv1.Frame, file string) (err error) {
+func (s *Store) writeLapRow(ctx context.Context, src string, lap *eventsv1.LapCompleted, frames []*telemetryv1.Frame, file string,
+	also func(*sql.Tx) error,
+) (err error) {
 	facts := factsOf(frames)
 	var lapTime driver.Value // a lap with no time (a partial one) is NULL, as in v1
 	if lap.GetLapTimeMs() > 0 {
@@ -278,6 +290,11 @@ ON CONFLICT (src, session_id, lap) DO UPDATE SET
 	}
 	if err = refreshSession(ctx, tx, src, lap.GetSessionId()); err != nil {
 		return err
+	}
+	if also != nil {
+		if err = also(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

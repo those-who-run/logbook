@@ -231,7 +231,7 @@ func TestRunListensOnTheConfiguredAddress(t *testing.T) {
 }
 
 func TestTheServerCutsOffSlowAndIdleClients(t *testing.T) {
-	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	srv := NewServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 	for _, c := range []struct {
 		name      string
 		got, want time.Duration
@@ -264,7 +264,7 @@ func TestServeReportsAListenerThatFails(t *testing.T) {
 
 func TestShutdownTakesTheServerClosedAsACleanStop(t *testing.T) {
 	for _, servedErr := range []error{http.ErrServerClosed, nil} {
-		srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+		srv := NewServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 		served := make(chan error, 1)
 		served <- servedErr
 		if err := shutdown(t.Context(), srv, served); err != nil {
@@ -276,7 +276,7 @@ func TestShutdownTakesTheServerClosedAsACleanStop(t *testing.T) {
 func TestShutdownReturnsWhatServeFailedWith(t *testing.T) {
 	// Serve can fail on its own as ctx is done, and serve's select then takes ctx.
 	failed := errors.New("accept: too many open files")
-	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	srv := NewServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 	served := make(chan error, 1)
 	served <- failed
 	err := shutdown(t.Context(), srv, served)
@@ -288,7 +288,7 @@ func TestShutdownReturnsWhatServeFailedWith(t *testing.T) {
 func TestShutdownReturnsBothItsOwnAndServesErrors(t *testing.T) {
 	// A request still in flight when the grace period is over makes Shutdown fail.
 	entered, release := make(chan struct{}), make(chan struct{})
-	srv := newServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	srv := NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		close(entered)
 		<-release
 	}), NewLogger(io.Discard, slog.LevelInfo))

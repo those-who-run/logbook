@@ -23,11 +23,18 @@ COPY . .
 # label does; a pull request's image build passes none, and reports `dev`.
 ARG VERSION=dev
 # -trimpath keeps the build machine's paths out of the binary.
-RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/service ./cmd/logbook
+RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/service ./cmd/logbook \
+    && mkdir /out/data
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 COPY --from=build /out/service /service
+# The store's data directory (paddock#38), owned by the user that writes it; a
+# volume is mounted over it.
+COPY --from=build --chown=65532:65532 /out/data /data
+ENV TWR_DATA_DIR=/data
 # distroless's nonroot user (65532), by number so a runtime can check it isn't root.
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/service"]
+# `logbook run`; arguments given to `docker run` replace it, as `-version` does.
+CMD ["run"]

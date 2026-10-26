@@ -19,7 +19,9 @@ concurrency:
 
 jobs:
   # The smoke test runs the image as it would be deployed: it must start as its
-  # non-root user and answer GET /healthz within 10 s.
+  # non-root user, open its store in /data and answer GET /healthz within 10 s.
+  # There is no NATS server here, so the answer is 503 with "connected": false
+  # (README.md, "Running").
   image:
     permissions:
       contents: read
@@ -35,7 +37,11 @@ jobs:
         id=$(docker run --detach --publish 127.0.0.1:8080:8080 "$IMAGE")
         trap 'docker logs "$id"; docker rm --force "$id" >/dev/null' EXIT
         for _ in $(seq 20); do
-          if curl --fail --silent --show-error http://127.0.0.1:8080/healthz; then exit 0; fi
+          body=$(curl --silent --show-error --write-out ' %{http_code}' http://127.0.0.1:8080/healthz) || body=
+          case $body in
+            *'"connected":false'*' 503')
+              if docker logs "$id" | grep -q '"msg":"store open"'; then echo "$body"; exit 0; fi ;;
+          esac
           sleep 0.5
         done
         echo "GET /healthz did not answer within 10 s" >&2

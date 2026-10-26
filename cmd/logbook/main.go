@@ -1,7 +1,8 @@
-// Command logbook runs the template's example service: it reads its configuration
-// from the environment, logs JSON to standard output and serves GET /healthz until
-// it gets SIGINT or SIGTERM. `logbook -version` prints its version and exits, and
-// `logbook export --data DIR --laps` prints the stored laps as JSON lines.
+// Command logbook is the store for Those Who Run v2. `logbook run --data DIR`
+// consumes frames and events from NATS into the store and serves GET /healthz
+// until it gets SIGINT or SIGTERM; `logbook export --data DIR --laps` prints the
+// stored laps as JSON lines; `logbook -version` prints its version. With no
+// command it runs the template's example service, which serves GET /healthz.
 package main
 
 import (
@@ -36,8 +37,13 @@ func main() {
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if len(args) > 0 && args[0] == "export" {
-		return export(ctx, args[1:], getenv, stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "export":
+			return export(ctx, args[1:], getenv, stdout, stderr)
+		case "run":
+			return runCommand(ctx, args[1:], getenv, stdout, stderr)
+		}
 	}
 	flags := flag.NewFlagSet("logbook", flag.ContinueOnError)
 	flags.SetOutput(stderr)

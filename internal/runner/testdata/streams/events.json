@@ -1,0 +1,30 @@
+{
+  "$comment": [
+    "EVENTS: domain events from every source (live, replay-<run>, parity), the durable, deduplicated feed logbook reads (ADR 0001, point 1; paddock#36). One stream for every source: pruning a replay is a delete by src in logbook (paddock#45), not a stream of its own.",
+    "subjects: twr.v1.*.evt.> covers every event subject in contracts' subjects.yaml, twr.v1.<src>.evt.<sid>.<area>.<what>.",
+    "max_age 30 d (2592000000000000 ns): ADR 0001's starting value, so a consumer that is down for weeks can still catch up. Lauda measures whether 30 d is right.",
+    "max_bytes 1 GiB (1073741824): an event is a few hundred bytes (session.ended with its summary a few KB), so a session of 50 laps is tens of KB, and 30 d of driving and replays stays far below 1 GiB. The limit is a backstop so the stream cannot fill the disk (paddock#36, decision of 2026-10-24).",
+    "discard old: if the backstop is ever reached, the oldest events go first, never new ones.",
+    "duplicate_window 2 min (120000000000 ns): events carry a deterministic Nats-Msg-Id (ADR 0002, point 4), so a replay or a restarted ecu that republishes within 2 min stores each event once.",
+    "max_msg_size -1: bounded by the server's max_payload (1 MiB by default). max_msgs, max_msgs_per_subject and max_consumers -1: max_bytes and max_age are the limits.",
+    "num_replicas 1: one NATS server (ADR 0004). File storage so a server restart keeps the events."
+  ],
+  "name": "EVENTS",
+  "description": "Domain events from every source, kept 30 d, deduplicated on Nats-Msg-Id (paddock#36).",
+  "subjects": ["twr.v1.*.evt.>"],
+  "retention": "limits",
+  "storage": "file",
+  "num_replicas": 1,
+  "discard": "old",
+  "max_age": 2592000000000000,
+  "max_bytes": 1073741824,
+  "duplicate_window": 120000000000,
+  "max_msgs": -1,
+  "max_msgs_per_subject": -1,
+  "max_msg_size": -1,
+  "max_consumers": -1,
+  "deny_delete": false,
+  "deny_purge": false,
+  "allow_rollup_hdrs": false,
+  "allow_direct": false
+}
