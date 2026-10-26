@@ -103,8 +103,11 @@ func (s *Store) StageFrames(ctx context.Context, frames []StagedFrame) (err erro
 }
 
 // WriteStagedLap writes lap from the frames staged for its session, and in the
-// row's transaction deletes the staged frames up to the lap's last, which no later
-// lap needs. It returns how many frames in the lap's seq range were staged, which
+// row's transaction deletes the lap's own staged frames but its last. The last
+// stays for the next lap, which reads it to tell whether a finished frame at its
+// start closes a race (racingFrames); frames outside the lap stay for the laps
+// they belong to, which may be written later (a lap.completed can come late).
+// DropStaged takes what is left when the session ends. It returns how many frames in the lap's seq range were staged, which
 // is fewer than the range when some never arrived, and how many the file holds.
 func (s *Store) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (staged, written int, err error) {
 	src = sourceOf(src)
@@ -132,8 +135,9 @@ func (s *Store) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.La
 		}
 	}
 	written, err = s.writeLap(ctx, src, lap, frames, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `DELETE FROM frames_pending WHERE src = ? AND session_id = ? AND seq <= ?`,
-			src, lap.GetSessionId(), int64(lap.GetLastSeq()))
+		_, err := tx.ExecContext(ctx, `DELETE FROM frames_pending
+WHERE src = ? AND session_id = ? AND seq >= ? AND seq < ?`,
+			src, lap.GetSessionId(), int64(lap.GetFirstSeq()), int64(lap.GetLastSeq()))
 		return err
 	})
 	if err != nil {
@@ -218,22 +222,48 @@ FROM sessions s WHERE s.ended_at IS NULL ORDER BY s.started_at, s.src, s.id`)
 	return out, nil
 }
 
-// Session says whether src's session id is in the index, and whether it has ended.
-func (s *Store) Session(ctx context.Context, src, sessionID string) (SessionState, error) {
+// Session says whether src's session id is in the index, whether it has ended,
+// and the run its frames came from ("" when none was ever staged).
+func (s *Store) Session(ctx context.Context, src, sessionID string) (SessionState, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ended sql.NullTime
-	err := s.index.QueryRowContext(ctx, `SELECT ended_at FROM sessions WHERE src = ? AND id = ?`,
-		sourceOf(src), sessionID).Scan(&ended)
+	var run sql.NullString
+	err := s.index.QueryRowContext(ctx, `SELECT ended_at, run FROM sessions WHERE src = ? AND id = ?`,
+		sourceOf(src), sessionID).Scan(&ended, &run)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return SessionUnknown, nil
+		return SessionUnknown, "", nil
 	case err != nil:
-		return SessionUnknown, fmt.Errorf("store: session %s/%s: %w", src, sessionID, err)
+		return SessionUnknown, "", fmt.Errorf("store: session %s/%s: %w", src, sessionID, err)
 	case ended.Valid:
-		return SessionEnded, nil
+		return SessionEnded, run.String, nil
 	}
-	return SessionOpen, nil
+	return SessionOpen, run.String, nil
+}
+
+// LapsWritten returns the numbers of the laps src's session has rows for, in order.
+func (s *Store) LapsWritten(ctx context.Context, src, sessionID string) (laps []int32, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.index.QueryContext(ctx, `SELECT lap FROM laps WHERE src = ? AND session_id = ? ORDER BY lap`,
+		sourceOf(src), sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("store: laps of %s/%s: %w", src, sessionID, err)
+	}
+	defer func() {
+		if cerr := rows.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("store: laps of %s/%s: %w", src, sessionID, cerr)
+		}
+	}()
+	for rows.Next() {
+		var n int32
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("store: laps of %s/%s: %w", src, sessionID, err)
+		}
+		laps = append(laps, n)
+	}
+	return laps, rows.Err()
 }
 
 // HasLap says whether src's session has a row for lap.

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
+	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
 )
 
 const run = "01JB8Z0000RUNAAAAAAAAAAAAA"
@@ -55,16 +58,21 @@ func TestALapFromStagedFramesEqualsOneFromItsFrames(t *testing.T) {
 		if want := int(lap.GetLastSeq() - lap.GetFirstSeq() + 1); n != want || written != want {
 			t.Errorf("lap %d: %d staged and %d written, want %d", lap.GetLap(), n, written, want)
 		}
-		left := rowsOf(t, ctx, s.index, `SELECT count(*) FROM frames_pending WHERE seq <= ?`, int64(lap.GetLastSeq()))
+		left := rowsOf(t, ctx, s.index, `SELECT count(*) FROM frames_pending WHERE seq >= ? AND seq < ?`,
+			int64(lap.GetFirstSeq()), int64(lap.GetLastSeq()))
 		if left[0][0] != "0" {
-			t.Errorf("lap %d left %s frames staged up to its end", lap.GetLap(), left[0][0])
+			t.Errorf("lap %d left %s of its frames staged before its last", lap.GetLap(), left[0][0])
 		}
 	}
 	if err := s.EndSession(ctx, "live", sess.ended, sess.endedAt); err != nil {
 		t.Fatal(err)
 	}
-	if got := staged(t, s); len(got) != 1 {
-		t.Errorf("the frames after the last lap: %q", got)
+	// Left for the end: the frames before lap 1, each lap's last and those after.
+	if got := staged(t, s); len(got) != 1 || got[0][2] != fmt.Sprint(30+len(sess.laps)+10) {
+		t.Errorf("staged at the end: %q", got)
+	}
+	if got, err := s.LapsWritten(ctx, "live", sid); err != nil || !slices.Equal(got, []int32{1, 2, 3}) {
+		t.Errorf("LapsWritten = %v, %v", got, err)
 	}
 	if err := s.DropStaged(ctx, "live", sid); err != nil {
 		t.Fatal(err)
@@ -161,9 +169,10 @@ func TestOpenSessionsAndTheirRuns(t *testing.T) {
 	for _, c := range []struct {
 		src, id string
 		want    SessionState
-	}{{"live", sid, SessionEnded}, {"replay-x", b.started.GetSessionId(), SessionOpen}, {"parity", sid, SessionUnknown}} {
-		if got, err := s.Session(ctx, c.src, c.id); err != nil || got != c.want {
-			t.Errorf("Session(%s, %s) = %v, %v; want %v", c.src, c.id, got, err, c.want)
+		run     string
+	}{{"live", sid, SessionEnded, run}, {"replay-x", b.started.GetSessionId(), SessionOpen, ""}, {"parity", sid, SessionUnknown, ""}} {
+		if got, r, err := s.Session(ctx, c.src, c.id); err != nil || got != c.want || r != c.run {
+			t.Errorf("Session(%s, %s) = %v, %q, %v; want %v, %q", c.src, c.id, got, r, err, c.want, c.run)
 		}
 	}
 	if n, err := s.Sessions(ctx); err != nil || n != 2 {
@@ -219,7 +228,11 @@ func TestStagingRefusesWhatItCannotStore(t *testing.T) {
 			return err
 		}(),
 		"Session": func() error {
-			_, err := closed.Session(ctx, "live", sid)
+			_, _, err := closed.Session(ctx, "live", sid)
+			return err
+		}(),
+		"LapsWritten": func() error {
+			_, err := closed.LapsWritten(ctx, "live", sid)
 			return err
 		}(),
 		"HasLap": func() error {
@@ -237,4 +250,69 @@ func TestStagingRefusesWhatItCannotStore(t *testing.T) {
 	}
 	// The index is closed already, so Close reports it; the rest still closes.
 	_ = closed.Close()
+}
+
+// N3: a lap that starts on the finished frame closing a race counts it, though
+// the lap before was written first: that lap's write leaves its own last frame
+// staged for the next lap to read.
+func TestTheNextLapStillSeesThePreviousLapsLastFrame(t *testing.T) {
+	ctx := t.Context()
+	sess := race("live", sid)
+	inRace := func(seq uint32) *telemetryv1.Frame {
+		return &telemetryv1.Frame{Seq: seq, Lap: 1, Phase: telemetryv1.Phase_PHASE_IN_RACE}
+	}
+	frames := []*telemetryv1.Frame{inRace(130), inRace(131),
+		{Seq: 132, Lap: 2, Phase: telemetryv1.Phase_PHASE_FINISHED}}
+	lap1 := &eventsv1.LapCompleted{SessionId: sid, Lap: 1, Complete: true, FirstSeq: 130, LastSeq: 131}
+	lap2 := &eventsv1.LapCompleted{SessionId: sid, Lap: 2, FirstSeq: 132, LastSeq: 132}
+
+	direct := open(t, t.TempDir())
+	if err := direct.StartSession(ctx, sess.started); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []*eventsv1.LapCompleted{lap1, lap2} {
+		if err := direct.WriteLap(ctx, "live", l, frames); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := open(t, t.TempDir())
+	if err := s.StartSession(ctx, sess.started); err != nil {
+		t.Fatal(err)
+	}
+	var st []StagedFrame
+	for _, f := range frames {
+		st = append(st, StagedFrame{Src: "live", SessionID: sid, Run: run, Frame: f})
+	}
+	if err := s.StageFrames(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []*eventsv1.LapCompleted{lap1, lap2} {
+		if _, _, err := s.WriteStagedLap(ctx, "live", l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := rowsOf(t, ctx, direct.index, `SELECT lap, frames FROM laps ORDER BY lap`)
+	got := rowsOf(t, ctx, s.index, `SELECT lap, frames FROM laps ORDER BY lap`)
+	if !slices.EqualFunc(got, want, slices.Equal) || got[1][1] != "1" {
+		t.Errorf("staged laps hold %q frames, from the frames %q", got, want)
+	}
+}
+
+// A lap written before an earlier one, as when the earlier lap's lap.completed
+// comes late, leaves the earlier lap's frames staged for it.
+func TestALaterLapLeavesAnEarlierLapsFrames(t *testing.T) {
+	ctx := t.Context()
+	sess := race("live", sid)
+	s := open(t, t.TempDir())
+	if err := s.StartSession(ctx, sess.started); err != nil {
+		t.Fatal(err)
+	}
+	stage(t, s, sess, 0, len(sess.frames))
+	if _, _, err := s.WriteStagedLap(ctx, "live", sess.laps[2]); err != nil {
+		t.Fatal(err)
+	}
+	n, written, err := s.WriteStagedLap(ctx, "live", sess.laps[1])
+	if want := int(sess.laps[1].GetLastSeq() - sess.laps[1].GetFirstSeq() + 1); err != nil || n != want || written != want {
+		t.Errorf("lap 2 after lap 3: %d staged, %d written, %v; want %d", n, written, err, want)
+	}
 }
