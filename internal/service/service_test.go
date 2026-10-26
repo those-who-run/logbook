@@ -221,7 +221,7 @@ func TestRunListensOnTheConfiguredAddress(t *testing.T) {
 }
 
 func TestTheServerCutsOffSlowAndIdleClients(t *testing.T) {
-	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	srv := NewServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 	for _, c := range []struct {
 		name      string
 		got, want time.Duration

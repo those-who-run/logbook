@@ -155,6 +155,10 @@ func (s *Store) Close() error {
 	return errors.Join(errs...)
 }
 
+// CheckKey refuses a source or session id the store cannot write under, so a
+// subscriber can tell a message it must drop from a store that failed.
+func CheckKey(src, sessionID string) error { return checkKey(sourceOf(src), sessionID) }
+
 // checkKey refuses a source or session id that cannot name a directory.
 func checkKey(src, sessionID string) error {
 	if !validSource.MatchString(src) {

@@ -55,6 +55,23 @@ CREATE TABLE laps (
     PRIMARY KEY (src, session_id, lap)
 );
 `,
+	// 2: frames staged until their lap is written (paddock#38). A fetched batch of
+	// frames is written here and acked, so a lap in progress survives a restart
+	// without holding thousands of frames unacked on the bus. A frame is its
+	// protobuf encoding; run is the ecu run that published it, from its ce-id, and
+	// a session's run is the run of its first staged frame, so a frame of another
+	// run (ecu restarted part way) never joins it.
+	`
+ALTER TABLE sessions ADD COLUMN run VARCHAR;
+CREATE TABLE frames_pending (
+    src VARCHAR NOT NULL,
+    session_id VARCHAR NOT NULL,
+    seq BIGINT NOT NULL,
+    run VARCHAR NOT NULL,
+    frame BLOB NOT NULL,
+    PRIMARY KEY (src, session_id, seq)
+);
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

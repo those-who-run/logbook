@@ -86,9 +86,9 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) e
 	return serve(ctx, ln, logger, version)
 }
 
-// newServer is the HTTP server for h, with the limits above, logging its own errors
+// NewServer is the HTTP server for h, with the limits above, logging its own errors
 // through logger.
-func newServer(h http.Handler, logger *slog.Logger) *http.Server {
+func NewServer(h http.Handler, logger *slog.Logger) *http.Server {
 	return &http.Server{
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -100,7 +100,7 @@ func newServer(h http.Handler, logger *slog.Logger) *http.Server {
 }
 
 func serve(ctx context.Context, ln net.Listener, logger *slog.Logger, version string) error {
-	srv := newServer(Handler(version), logger)
+	srv := NewServer(Handler(version), logger)
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(ln) }()
 	logger.InfoContext(ctx, "serving", "addr", ln.Addr().String(), "version", version)

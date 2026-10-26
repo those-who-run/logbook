@@ -1,0 +1,30 @@
+{
+  "$comment": [
+    "TELEMETRY: every full-rate GT7 frame, from every source (live, replay-<run>, parity), kept as a flight recorder so logbook can pick a lap up again after a restart (ADR 0001, point 1; paddock#36). The store, not this stream, is the record.",
+    "subjects: twr.v1.*.frame.gt7 only. The single * is the source token, so the 20 Hz copy twr.v1.<src>.frame.gt7.lo (one token longer) is not captured.",
+    "max_age 2 h (7200000000000 ns): ADR 0001's starting value, long enough to cover a logbook restart mid-session.",
+    "max_bytes 2 GiB (2147483648): ADR 0001 puts a frame as JSON at about 1.3 KB, 60 a second, about 280 MB an hour; the full CloudEvents headers (paddock#34) add about 43 MB an hour, so about 325 MB an hour. 2 h of live is about 650 MB. A replay at --speed max writes an hour of frames in seconds, and discard old would push live frames out first, so the limit is about 6 h of frames: 2 h of live with room for replays (paddock#36, decision of 2026-10-24).",
+    "discard old: a full stream drops its oldest frames, never refuses new ones, so the frame path never sees an error.",
+    "duplicate_window 2 min (120000000000 ns): frames carry Nats-Msg-Id <run>:frame:<seq> (paddock#34), so a frame ecu publishes twice after a reconnect is stored once. Live, at 60 Hz, that is about 7,200 ids held. A replay at --speed max publishes far faster, so it holds far more: every frame of a 1 h recording, about 216,000 ids, a few tens of MB of server memory for 2 min, which is acceptable.",
+    "max_msg_size -1: bounded by the server's max_payload (1 MiB by default), far above a frame. max_msgs, max_msgs_per_subject and max_consumers -1: max_bytes and max_age are the limits.",
+    "num_replicas 1: one NATS server (ADR 0004). File storage so a server restart keeps the frames."
+  ],
+  "name": "TELEMETRY",
+  "description": "Full-rate frames from every source, a 2 h flight recorder for logbook (paddock#36).",
+  "subjects": ["twr.v1.*.frame.gt7"],
+  "retention": "limits",
+  "storage": "file",
+  "num_replicas": 1,
+  "discard": "old",
+  "max_age": 7200000000000,
+  "max_bytes": 2147483648,
+  "duplicate_window": 120000000000,
+  "max_msgs": -1,
+  "max_msgs_per_subject": -1,
+  "max_msg_size": -1,
+  "max_consumers": -1,
+  "deny_delete": false,
+  "deny_purge": false,
+  "allow_rollup_hdrs": false,
+  "allow_direct": false
+}
