@@ -1,0 +1,51 @@
+name: Release PR
+
+# Keeps the release PR open with release-please, through release-please.yml in
+# those-who-run/.github, running as the organisation's release App (twr-release).
+# Merging the release PR tags the merge commit `vX.Y.Z`, creates the GitHub release
+# and dispatches release.yml on the tag, which publishes.
+#
+# Config: release-please-config.json and .release-please-manifest.json. Before 1.0,
+# feat and fix bump the patch and a breaking change (`!` or a `BREAKING CHANGE:`
+# footer) bumps the minor. A `Release-As: x.y.z` footer sets the version by hand.
+#
+# The App's Client ID and private key come from this repository's `release-please`
+# environment (main only, no reviewers): the variable RELEASE_APP_CLIENT_ID and the
+# secret RELEASE_APP_PRIVATE_KEY. The key is passed below by name, never with
+# `secrets: inherit`; it exists only in the environment, and the reusable job that
+# names the environment receives the environment's value.
+#
+# workflow_dispatch is the way back if a merged release PR was not tagged (its label
+# still says `autorelease: pending`): run this workflow on main and release-please
+# tags and releases as on a merge.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing by default; the job grants what release-please.yml's jobs use with the
+# GITHUB_TOKEN (the digest, auto-merge-off and the release dispatch), and each of
+# them narrows it. release-please itself writes with the App's token.
+permissions: {}
+
+# One run at a time; a newer push supersedes a queued one, never a running one.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release:
+    permissions:
+      contents: read
+      pull-requests: write
+      # For the release dispatch. A repository with no release workflow keeps it
+      # too: GitHub refuses to start a reusable workflow whose jobs ask for more
+      # than the caller grants, whether or not those jobs would run.
+      actions: write
+    uses: those-who-run/.github/.github/workflows/release-please.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      # Dispatched on the new tag; empty for a repository with nothing to publish.
+      release-workflow: release.yml
+    # By name only: the reusable job reads the environment's value.
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

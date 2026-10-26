@@ -1,0 +1,33 @@
+name: Release
+
+# Publishes a release's image: release-pr.yml dispatches this on the new `vX.Y.Z`
+# tag once release-please has tagged. image.yml in those-who-run/.github builds and
+# smoke-tests the image from the tag; image-publish.yml then pushes that exact build
+# as ghcr.io/those-who-run/twr-<repository>:X.Y.Z and attests it. image-publish.yml
+# fails on any ref but a release tag and runs in this repository's `release`
+# environment (v* tags only, the maintainer as required reviewer), so a dispatch by
+# hand on a branch publishes nothing. Only the publish job can write packages.
+on:
+  workflow_dispatch:
+
+# Nothing by default; each job asks for what it uses.
+permissions: {}
+
+jobs:
+  image:
+    permissions:
+      contents: read
+    uses: those-who-run/.github/.github/workflows/image.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      smoke: docker run --rm "$IMAGE" -version
+  publish:
+    needs: image
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: those-who-run/.github/.github/workflows/image-publish.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      digest: ${{ needs.image.outputs.digest }}
+      artifact: ${{ needs.image.outputs.artifact }}

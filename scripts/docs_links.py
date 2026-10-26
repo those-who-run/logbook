@@ -3,9 +3,9 @@
 Lifted from those-who-run/paddock's scripts/docs_links.py (paddock#20), itself from
 v1 (those-who-run/those-who-run, scripts/docs_links.py, #338 R4). ``make test``, CI's ``test`` job and the ``docs-links`` commit hook run
 it. It reads every Markdown file in the repository (but ``CHANGELOG.md``, which
-release-please writes, and what lives under ``.git`` or ``.claude``, where Claude
-Code keeps its worktrees), and for every link or image in them, Markdown or HTML
-(``href``, ``src``, ``srcset``), checks that:
+release-please writes, and what lives under ``.git``, ``.claude``, where Claude
+Code keeps its worktrees, or ``build``, which ``make`` writes), and for every link
+or image in them, Markdown or HTML (``href``, ``src``, ``srcset``), checks that:
 
 - a relative path names a file or directory that exists (percent-encoded, as in
   ``a%20b.md``, it is decoded first; one starting ``/`` is from the repository's
@@ -32,9 +32,10 @@ from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parent.parent
 SKIP = {"CHANGELOG.md"}
-# Not the repository's own Markdown: git's internals, and Claude Code's worktrees,
-# which are other checkouts.
-SKIP_DIRS = {".git", ".claude"}
+# Not the repository's own Markdown: git's internals, Claude Code's worktrees,
+# which are other checkouts, and what `make` writes into build/ (a virtual
+# environment's packages among it).
+SKIP_DIRS = {".git", ".claude", "build"}
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")

@@ -1,0 +1,7 @@
+# Only what the build needs goes to the builder: the module and its code. A new
+# top-level directory of Go code is added here too.
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
