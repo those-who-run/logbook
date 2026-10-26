@@ -60,17 +60,27 @@ func (l *readyLog) addr() string {
 
 func get(t *testing.T, url string) int {
 	t.Helper()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	code, err := fetch(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return code
+}
+
+// fetch is get for a goroutine other than the test's, where t.Fatal would end only
+// that goroutine and leave the test waiting: it returns the error instead.
+func fetch(ctx context.Context, url string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatal(err)
+		return 0, err
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
-	return resp.StatusCode
+	return resp.StatusCode, nil
 }
 
 func TestConfigFromEnv(t *testing.T) {
@@ -252,7 +262,7 @@ func TestServeReportsAListenerThatFails(t *testing.T) {
 	}
 }
 
-func TestShutdownTakesTheServerClosedAsAClean(t *testing.T) {
+func TestShutdownTakesTheServerClosedAsACleanStop(t *testing.T) {
 	for _, servedErr := range []error{http.ErrServerClosed, nil} {
 		srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 		served := make(chan error, 1)
@@ -288,10 +298,15 @@ func TestShutdownReturnsBothItsOwnAndServesErrors(t *testing.T) {
 	}
 	stopped := make(chan error, 1)
 	go func() { stopped <- srv.Serve(ln) }()
-	answered := make(chan int, 1)
-	go func() { answered <- get(t, "http://"+ln.Addr().String()+"/") }()
+	answered := make(chan error, 1)
+	go func() {
+		_, err := fetch(t.Context(), "http://"+ln.Addr().String()+"/")
+		answered <- err
+	}()
 	select {
 	case <-entered:
+	case err := <-answered:
+		t.Fatalf("the request was answered before it reached the handler: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("the request did not reach the handler in 10 s")
 	}
@@ -303,11 +318,46 @@ func TestShutdownReturnsBothItsOwnAndServesErrors(t *testing.T) {
 	cancel()
 	err = shutdown(over, srv, served)
 	close(release)
-	<-answered
+	if err := <-answered; err != nil {
+		t.Errorf("GET in flight during shutdown: %v", err)
+	}
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, failed) {
 		t.Errorf("shutdown = %v, want both the shutdown and the serve error", err)
 	}
 	if err := <-stopped; !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("Serve = %v after Shutdown, want http.ErrServerClosed", err)
+	}
+}
+
+func TestShutdownWaitsForServeToReturn(t *testing.T) {
+	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	called := make(chan struct{})
+	srv.RegisterOnShutdown(func() { close(called) })
+	// Unbuffered, so Serve's error is sent only while shutdown is waiting for it.
+	served := make(chan error)
+	done := make(chan error, 1)
+	go func() { done <- shutdown(t.Context(), srv, served) }()
+	select {
+	case <-called:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown not called in 10 s")
+	}
+
+	// Serve has not returned yet, so shutdown must not have either. A shutdown that
+	// stops waiting returns within the window; one that waits never does, so the
+	// window can only make this test pass wrongly, never fail wrongly.
+	select {
+	case err := <-done:
+		t.Fatalf("shutdown = %v before Serve returned", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	failed := errors.New("accept: too many open files")
+	select {
+	case served <- failed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("shutdown no longer waiting for Serve after 10 s")
+	}
+	if err := <-done; !errors.Is(err, failed) {
+		t.Errorf("shutdown = %v, want the serve error %q", err, failed)
 	}
 }
