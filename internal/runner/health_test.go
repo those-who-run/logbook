@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // awaitHealth polls GET /healthz until it answers code, and returns the body.
@@ -50,8 +52,7 @@ func TestHealthzFollowsTheServerAndTheConsumers(t *testing.T) {
 		t.Errorf("once bound: %+v", body)
 	}
 
-	srv.Shutdown()
-	srv.WaitForShutdown()
+	srv.stop()
 	body = awaitHealth(t, addr, http.StatusServiceUnavailable)
 	if body.Connected {
 		t.Errorf("after the server went: %+v", body)
@@ -94,5 +95,47 @@ func TestHealthzIsGetOnly(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /healthz: %d, want 405", resp.StatusCode)
+	}
+}
+
+// R1: the consumers are logbook's own. One deleted while it runs is created again
+// with its settings, and what comes after is written.
+func TestADeletedConsumerIsCreatedAgain(t *testing.T) {
+	srv, js := testServer(t)
+	dir := t.TempDir()
+	in := start(t, testConfig(srv.ClientURL(), dir))
+	addr := in.healthAddr(t)
+	awaitHealth(t, addr, http.StatusOK)
+	in.logs.await(t, 1, "consumers bound", nil)
+	for _, c := range [][2]string{{framesStream, FramesConsumer}, {eventsStream, EventsConsumer}} {
+		if err := js.DeleteConsumer(t.Context(), c[0], c[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in.logs.await(t, 2, "consumers bound", nil)
+	frames, events := consumerConfigs(2 * time.Second)
+	for _, want := range []jetstream.ConsumerConfig{frames, events} {
+		stream := framesStream
+		if want.Durable == EventsConsumer {
+			stream = eventsStream
+		}
+		cons, err := js.Consumer(t.Context(), stream, want.Durable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := cons.CachedInfo().Config
+		if got.FilterSubject != want.FilterSubject || got.AckPolicy != want.AckPolicy ||
+			got.AckWait != want.AckWait || got.MaxAckPending != want.MaxAckPending || got.DeliverPolicy != want.DeliverPolicy {
+			t.Errorf("%s: %+v, want %+v", want.Durable, got, want)
+		}
+	}
+	r := newRace("live", runA, sidA)
+	publish(t, js, r.messages().msgs, false)
+	in.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
+	if err := in.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if snap := takeSnapshot(t, dir); len(snap.laps) != r.laps {
+		t.Errorf("%d laps, want %d", len(snap.laps), r.laps)
 	}
 }

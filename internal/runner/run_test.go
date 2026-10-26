@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go/jetstream"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
@@ -198,7 +197,7 @@ func TestRedeliveriesAndDuplicatesChangeNothing(t *testing.T) {
 
 // waitStreamRead waits until both consumers have acked every message their streams
 // hold.
-func waitStreamRead(t *testing.T, js jetstream.JetStream, _ *server.Server) {
+func waitStreamRead(t *testing.T, js jetstream.JetStream, _ *natsServer) {
 	t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {

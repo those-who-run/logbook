@@ -123,6 +123,15 @@ on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
 `make check` runs what CI runs; [`AGENTS.md`](AGENTS.md) says what that is and
 what a new clone runs first.
 
+The tests of `logbook run` (`internal/runner`) run a real `nats-server -js`
+as a process of its own: the release paddock pins (`v2.15.1`), downloaded
+once from its GitHub release into the user's cache directory and checked
+against the SHA-256 sums in `internal/runner/natsserver_test.go`.
+`TWR_TEST_NATS_SERVER` names a binary of that release to use instead. They
+create `TELEMETRY` and `EVENTS` from `internal/runner/testdata/streams`, exact
+copies of paddock's `deploy/nats/streams` at the commit the tests name, which
+a test checks by their sums.
+
 ## Conventions
 
 The ones every Go component shares, from the

@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
-	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/those-who-run/contracts/ce"
@@ -43,28 +42,6 @@ const paddockCommit = "c0fe6669ee16aab1f3ee49f3a21e8a312cb790bc"
 var streamSHA256 = map[string]string{
 	"events.json":    "35f36adb53eebba2f9501faf08a3f3c15d889b17579896bdfc62e35a4becf37e",
 	"telemetry.json": "fb19cea7144a8070149e55de0f7890817903968e09a95ebdbbf8607a43faa4b5",
-}
-
-// startNATS starts an in-process nats-server with JetStream on port (-1 for any),
-// stopped when the test ends. A real server: nothing of NATS is mocked (R9).
-func startNATS(t *testing.T, port int) *server.Server {
-	t.Helper()
-	s, err := server.NewServer(&server.Options{
-		Host: "127.0.0.1", Port: port, JetStream: true, StoreDir: t.TempDir(),
-		NoLog: true, NoSigs: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	go s.Start()
-	if !s.ReadyForConnections(10 * time.Second) {
-		t.Fatal("nats-server not ready after 10 s")
-	}
-	t.Cleanup(func() {
-		s.Shutdown()
-		s.WaitForShutdown()
-	})
-	return s
 }
 
 // connect is a JetStream client for the test's own publishing and checks.
@@ -108,9 +85,9 @@ func createStreams(t *testing.T, js jetstream.JetStream) {
 }
 
 // testServer is a server with the streams, and a client on it.
-func testServer(t *testing.T) (*server.Server, jetstream.JetStream) {
+func testServer(t *testing.T) (*natsServer, jetstream.JetStream) {
 	t.Helper()
-	s := startNATS(t, -1)
+	s := startNATS(t, 0)
 	js := connect(t, s.ClientURL())
 	createStreams(t, js)
 	return s, js

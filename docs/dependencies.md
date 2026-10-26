@@ -31,4 +31,3 @@ the test reads.
 | `github.com/those-who-run/contracts` | The v0.1 messages the store writes from: `Frame`, `SessionStarted`, `LapCompleted` and `SessionEnded` (paddock ADR 0002). |
 | `google.golang.org/protobuf` | The runtime the contracts' generated code is written for; the tests build messages with its helpers (`proto.Int32`, `timestamppb`). |
 | `github.com/nats-io/nats.go` | The NATS client, with its `jetstream` package: `logbook run`'s two durable pull consumers, `logbook-frames` on `TELEMETRY` and `logbook-events` on `EVENTS` (paddock#38). The official Go client, from the NATS maintainers (`nats-io`); Apache-2.0. |
-| `github.com/nats-io/nats-server/v2` | Tests only: a real NATS server with JetStream, started in the test process, for `internal/runner`'s integration tests (paddock#38, R9: no mocks of NATS). The NATS server itself, from `nats-io`; Apache-2.0. Not linked into the binary. |
