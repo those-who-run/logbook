@@ -1,4 +1,4 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>those-who-run/.github#v0.2.1"]
+  "extends": ["github>those-who-run/.github#v0.2.4"]
 }

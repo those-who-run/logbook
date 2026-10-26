@@ -1,4 +1,6 @@
 __pycache__/
+# make's output: the coverage profile, the test log, the template check's copier.
+/build/
 # Claude Code: only the shared settings, the guard and its config are tracked;
 # the rest, among it the worktrees in .claude/worktrees/, stays out.
 .claude/*

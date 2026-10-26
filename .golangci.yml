@@ -1,0 +1,43 @@
+# golangci-lint's configuration, read by `make lint` and go.yml's lint step, which run
+# the version pinned in tools/go.mod.
+version: "2"
+
+linters:
+  # The standard set (errcheck, govet, ineffassign, staticcheck, unused), and:
+  # gosec for the security checks, revive for the style the Go team documents
+  # (exported names carry a comment), errorlint so wrapped errors are compared with
+  # errors.Is and errors.As, and sloglint so every log call uses log/slog's
+  # key-value pairs the same way (README.md, "Conventions").
+  default: standard
+  enable:
+    - errorlint
+    - gosec
+    - revive
+    - sloglint
+  settings:
+    sloglint:
+      kv-only: true
+      no-global: all
+      context: scope
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+        - name: var-naming
+        - name: error-strings
+        - name: error-return
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: receiver-naming
+        - name: unused-parameter
+        - name: unreachable-code
+  # No preset exclusions: a finding is fixed, or silenced at its line with a
+  # `//nolint:<linter> // <why>` comment a reviewer can see.
+  exclusions:
+    presets: []
+
+issues:
+  # Every finding, not the first few per linter.
+  max-issues-per-linter: 0
+  max-same-issues: 0

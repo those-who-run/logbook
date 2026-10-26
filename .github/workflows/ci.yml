@@ -1,9 +1,11 @@
 name: CI
 
-# Two jobs are required by name on `main`: `test`, the repository's own checks, and
-# `checks / checks`, the language-neutral checks every repository runs, from
-# checks.yml in those-who-run/.github. Renaming either leaves `main` waiting for a
-# check that never reports.
+# Three jobs here are required by name on `main`: `test`, the repository's own
+# checks; `checks / checks`, the language-neutral checks every repository runs, from
+# checks.yml in those-who-run/.github; and `go / check`, the Go checks, from go.yml
+# there. A repository with an image also requires `image / build`, from image.yml in
+# this directory. Renaming any of them leaves `main` waiting for a check that never
+# reports.
 on:
   pull_request:
   push:
@@ -17,12 +19,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Actions and the reusable workflow are pinned by commit SHA (the tag in the
-# comment); Renovate bumps them (renovate.json).
+# Actions and the reusable workflows are pinned by commit SHA (the tag in the
+# comment); Renovate bumps them (renovate.json). The reusable workflows share one
+# pin, so they are bumped together.
 jobs:
-  # The repository's own checks, the same `make test` a laptop runs: the Markdown
-  # links, the guard copy against .github's agent/ at the commit pinned for checks.yml
-  # below, and the tests.
+  # The repository's own checks, the same `make test` a laptop runs: the Go tests
+  # with the coverage floor, the Markdown links, the guard copy against .github's
+  # agent/ at the commit pinned for checks.yml below, and the tests in tests/.
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -31,6 +34,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: "**/go.sum"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
@@ -40,7 +47,22 @@ jobs:
   # The commit hooks on every file, gitleaks over the PR's commits, the PR title and
   # dependency review. No `if:` or `needs:`, so the required check always reports.
   # The guard copy check reads this pin, so bump the copies in .claude/ with it.
+  # The Go hooks (gofmt, go mod tidy, golangci-lint) need Go, installed from go.mod.
   checks:
     permissions:
       contents: read
-    uses: those-who-run/.github/.github/workflows/checks.yml@3f878d3f5b7356e3db46dafc977b2046b44f24b3 # v0.2.1
+    uses: those-who-run/.github/.github/workflows/checks.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      go-version-file: go.mod
+
+  # gofmt, go mod tidy, go vet, golangci-lint, the tests with the race detector and
+  # the coverage floor, go build and govulncheck, as `make check` runs them, behind
+  # the Go test guard. The floor is the Makefile's COVERAGE_FLOOR too
+  # (tests/test_go_floor.py keeps the two equal).
+  go:
+    permissions:
+      contents: read
+      pull-requests: read # the weakened-tests check reads the PR's description
+    uses: those-who-run/.github/.github/workflows/go.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      coverage-floor: 90

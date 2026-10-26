@@ -1,0 +1,42 @@
+name: Image
+
+# The container image on every PR: image.yml in those-who-run/.github builds it from
+# the Dockerfile, smoke-tests it and pushes nothing. The job is required by name on
+# `main` as `image / build`; renaming the job leaves `main` waiting for a check that
+# never reports. A repository without an image deletes this file with the
+# Dockerfile, .dockerignore and release.yml (README.md, "Without an image").
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Nothing by default; the job asks for what it uses.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The smoke test runs the image as it would be deployed: it must start as its
+  # non-root user and answer GET /healthz within 10 s.
+  image:
+    permissions:
+      contents: read
+    uses: those-who-run/.github/.github/workflows/image.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    with:
+      smoke: |
+        docker run --rm "$IMAGE" -version
+        user=$(docker image inspect --format '{{.Config.User}}' "$IMAGE")
+        if [ "$user" != 65532:65532 ]; then
+          echo "the image runs as '$user', not distroless's nonroot user" >&2
+          exit 1
+        fi
+        id=$(docker run --detach --publish 127.0.0.1:8080:8080 "$IMAGE")
+        trap 'docker logs "$id"; docker rm --force "$id" >/dev/null' EXIT
+        for _ in $(seq 20); do
+          if curl --fail --silent --show-error http://127.0.0.1:8080/healthz; then exit 0; fi
+          sleep 0.5
+        done
+        echo "GET /healthz did not answer within 10 s" >&2
+        exit 1

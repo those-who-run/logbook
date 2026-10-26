@@ -1,8 +1,8 @@
 # The checks a commit meets before it is made: `make hooks` (`pre-commit install`)
 # sets them up, CI's `checks / checks` job (checks.yml in those-who-run/.github) runs
 # them on every file, and .claude/hooks/guard.py stops an agent from skipping them.
-# They are paddock's language-neutral hooks, with the same pins, plus the link check.
-# `make check` runs them with the rest of CI.
+# They are paddock's language-neutral hooks, with the same pins, plus the link check
+# and the Go hooks. `make check` runs them with the rest of CI.
 #
 # The external hooks are pinned to a commit SHA, the tag in the `frozen:` comment;
 # Renovate bumps them: renovate.json extends those-who-run/.github's shared preset
@@ -36,6 +36,35 @@ repos:
         # renames another file a page links to is caught by `make check` and CI's
         # `test` job, which run the check on every page.
         files: \.md$
+        pass_filenames: false
+
+  # Go: gofmt, `go mod tidy` and golangci-lint, through the Makefile's targets, so a
+  # commit and `make check` run the same commands, the ones go.yml runs in CI's
+  # `go / check`. golangci-lint is the version tools/go.mod pins (`go tool
+  # -modfile=tools/go.mod`), and gofmt comes with Go. A missing tool fails its hook
+  # rather than passing on an empty result: `make`, `go` or `gofmt` not found, or a
+  # golangci-lint that `go tool` can't fetch or build. Each checks the whole module
+  # whichever Go file changed, since a change in one file can break another.
+  # checks.yml installs Go from go.mod for them (ci.yml's `go-version-file`).
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: Go code is formatted (make fmt-check)
+        entry: make fmt-check
+        language: system
+        files: \.go$
+        pass_filenames: false
+      - id: go-mod-tidy
+        name: go.mod and tools/go.mod are tidy (make tidy)
+        entry: make tidy
+        language: system
+        files: (\.go|(^|/)go\.(mod|sum))$
+        pass_filenames: false
+      - id: golangci-lint
+        name: golangci-lint, the version tools/go.mod pins (make lint)
+        entry: make lint
+        language: system
+        files: (\.go|(^|/)go\.(mod|sum)|^\.golangci\.yml)$
         pass_filenames: false
 
   # gitleaks: the staged changes, before they are committed. In `--all-files` runs

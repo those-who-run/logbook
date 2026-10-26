@@ -36,7 +36,7 @@ class ThisRepository(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ("README.md", "CHANGELOG.md", ".claude/worktrees/x/README.md",
-                         ".github/a.md"):
+                         "build/venv/LICENSE.md", ".github/a.md"):
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("# x\n")
             names = {p.relative_to(root).as_posix() for p in docs_links.markdown_files(root)}
