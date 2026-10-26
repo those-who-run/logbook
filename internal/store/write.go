@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
@@ -74,12 +75,19 @@ func (s *Store) WriteLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 	return nil
 }
 
-// EndSession records how ev's session ended. Ending it again changes nothing: the
-// end time is the first one recorded.
-func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded) (err error) {
+// EndSession records how ev's session ended, at endedAt: the time the event was
+// published (its ce-time), which the caller passes because SessionEnded carries no
+// time of its own, and which is right for a replay or a catch-up where the store's
+// clock is not. The summary columns (laps_completed, best_lap_ms, final_position,
+// end_reason, ended_at) come from the first end and only from it: ending the
+// session again, or writing one of its laps after the end, leaves them alone.
+func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) (err error) {
 	src = sourceOf(src)
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
 		return err
+	}
+	if endedAt.IsZero() {
+		return fmt.Errorf("store: session %s has no end time", ev.GetSessionId())
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -95,18 +103,19 @@ func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.Session
 	if err = refreshSession(ctx, tx, src, ev.GetSessionId()); err != nil {
 		return err
 	}
-	// The summary is the event's word on the laps; the final position falls back
-	// to the last position a lap recorded, as v1's did when the finish had none.
+	// The summary is the event's word on the laps. With no finishing position,
+	// the final position is the last one a lap recorded by the end, as v1's was;
+	// a lap written later does not change it.
 	_, err = tx.ExecContext(ctx, `
 UPDATE sessions SET
-    ended_at = COALESCE(ended_at, ?),
+    ended_at = ?,
     end_reason = ?,
     laps_completed = ?,
     best_lap_ms = ?,
     final_position = COALESCE(?, (SELECT position FROM laps
         WHERE src = ? AND session_id = ? AND position IS NOT NULL ORDER BY lap DESC LIMIT 1))
-WHERE src = ? AND id = ?`,
-		s.now().UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
+WHERE src = ? AND id = ? AND ended_at IS NULL`,
+		endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
 		summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
 		optional(summary.FinishingPosition), src, ev.GetSessionId(),
 		src, ev.GetSessionId())
@@ -141,7 +150,7 @@ func (s *Store) sessionExists(ctx context.Context, src, sessionID string) error 
 // leaves the old file or the new one, never half of one.
 func (s *Store) writeLapFile(ctx context.Context, path string, frames []*telemetryv1.Frame) (err error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := mkdirSynced(dir); err != nil {
 		return err
 	}
 	tmp := filepath.Join(dir, "."+filepath.Base(path)+".tmp")
@@ -190,6 +199,30 @@ func (s *Store) writeLapFile(ctx context.Context, path string, frames []*telemet
 		return err
 	}
 	return syncFile(dir)
+}
+
+// mkdirSynced makes dir and any parents it lacks, and syncs the parent of each
+// directory it made. A new directory's entry lives in its parent, so without that
+// a power loss could keep the lap's row, committed through DuckDB's WAL, and lose
+// the session directory that holds its file.
+func mkdirSynced(dir string) error {
+	var made []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil || !errors.Is(err, os.ErrNotExist) || filepath.Dir(d) == d {
+			break
+		}
+		made = append(made, d)
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	// From the top down, so each parent's entry is on disk before its child's.
+	for i := len(made) - 1; i >= 0; i-- {
+		if err := syncFile(filepath.Dir(made[i])); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // syncFile flushes a file, or a directory's entries, to the disk.
@@ -249,14 +282,20 @@ ON CONFLICT (src, session_id, lap) DO UPDATE SET
 	return tx.Commit()
 }
 
-// refreshSession works out a session's totals from its laps, as v1 did: the
-// complete laps, the best complete lap, the fuel at the first lap's start and the
-// fuel all its laps used.
+// refreshSession works out a session's totals from its laps, as v1 did. The fuel
+// at the first lap's start and the fuel all its laps used come from the laps
+// always. The complete laps and the best complete lap do only until the session
+// ends: from then on they are the summary's (EndSession), which a late or
+// redelivered lap must not overwrite.
 func refreshSession(ctx context.Context, tx *sql.Tx, src, sessionID string) error {
 	_, err := tx.ExecContext(ctx, `
 UPDATE sessions SET
-    laps_completed = (SELECT count(*) FROM laps WHERE src = $1 AND session_id = $2 AND complete),
-    best_lap_ms = (SELECT min(lap_time_ms) FROM laps WHERE src = $1 AND session_id = $2 AND complete),
+    laps_completed = CASE WHEN ended_at IS NULL
+        THEN (SELECT count(*) FROM laps WHERE src = $1 AND session_id = $2 AND complete)
+        ELSE laps_completed END,
+    best_lap_ms = CASE WHEN ended_at IS NULL
+        THEN (SELECT min(lap_time_ms) FROM laps WHERE src = $1 AND session_id = $2 AND complete)
+        ELSE best_lap_ms END,
     fuel_at_start = (SELECT fuel_start FROM laps WHERE src = $1 AND session_id = $2 ORDER BY lap LIMIT 1),
     fuel_used = (SELECT round(sum(fuel_used), 3) FROM laps WHERE src = $1 AND session_id = $2)
 WHERE src = $1 AND id = $2`, src, sessionID)

@@ -30,6 +30,8 @@ type session struct {
 	laps    []*eventsv1.LapCompleted
 	frames  []*telemetryv1.Frame
 	ended   *eventsv1.SessionEnded
+	// endedAt is when ecu published the end: the event's ce-time.
+	endedAt time.Time
 }
 
 func race(src, id string) session {
@@ -42,7 +44,8 @@ func race(src, id string) session {
 			PosX: 100 * math.Cos(angle), PosY: 2, PosZ: 100 * math.Sin(angle),
 			SpeedKph: 150 + 50*math.Sin(angle) + float64(lap), EngineRpm: 7000,
 			Gear: 4, SuggestedGear: 15, Throttle: 255, FuelLevel: fuel,
-			TimeOfDayMs: 50_000_000 + int32(seq), //nolint:gosec // a few thousand frames CarCode: 3431, Flags: 1,
+			TimeOfDayMs: 50_000_000 + int32(seq), //nolint:gosec // a few thousand frames
+			CarCode:     3431, Flags: 1,
 		}
 		if phase == telemetryv1.Phase_PHASE_IN_RACE || phase == telemetryv1.Phase_PHASE_FINISHED {
 			f.Position = proto.Int32(2)
@@ -94,6 +97,7 @@ func race(src, id string) session {
 			LapsCompleted: 2, BestLap: proto.Int32(1), BestLapTimeMs: proto.Int32(98_100),
 		},
 	}
+	s.endedAt = time.Date(2026, 10, 15, 19, 35, 0, 0, time.UTC)
 	return s
 }
 
@@ -110,7 +114,7 @@ func (sess session) write(t *testing.T, s *Store) {
 			t.Fatal(err)
 		}
 	}
-	if err := s.EndSession(ctx, sess.started.GetSource(), sess.ended); err != nil {
+	if err := s.EndSession(ctx, sess.started.GetSource(), sess.ended, sess.endedAt); err != nil {
 		t.Fatal(err)
 	}
 }

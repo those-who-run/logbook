@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
@@ -61,11 +62,11 @@ func TestWritesAFilePerLapAndRowsEqualToTheEvents(t *testing.T) {
 		t.Errorf("lap 1 has %d frames, want %d", got, lapFrames)
 	}
 
-	session := rowsOf(t, t.Context(), s.index, `SELECT src, id, started_at, ended_at IS NOT NULL, type,
+	session := rowsOf(t, t.Context(), s.index, `SELECT src, id, started_at, ended_at, type,
 car_code, total_laps, joined_part_way, laps_completed, best_lap_ms, fuel_at_start, fuel_used,
 final_position, end_reason FROM sessions`)
 	want := [][]string{{
-		"live", sid, "2026-10-15T19:30:05.25Z", "true", "race", "3431", "3", "false", "2", "98100", "50",
+		"live", sid, "2026-10-15T19:30:05.25Z", "2026-10-15T19:35:00Z", "race", "3431", "3", "false", "2", "98100", "50",
 		fmt.Sprint(roundTo3(sess.laps[0].GetFuelUsed() + sess.laps[1].GetFuelUsed() + sess.laps[2].GetFuelUsed())),
 		"2", "finished",
 	}}
@@ -144,7 +145,7 @@ func TestTheNextDeliveryCompletesALapCutShort(t *testing.T) {
 	if err := s.WriteLap(t.Context(), "live", sess.laps[1], sess.frames); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EndSession(t.Context(), "live", sess.ended); err != nil {
+	if err := s.EndSession(t.Context(), "live", sess.ended, sess.endedAt); err != nil {
 		t.Fatal(err)
 	}
 	if got := rowsOf(t, t.Context(), s.index, lapRows); !slices.EqualFunc(got, want, slices.Equal) {
@@ -221,8 +222,8 @@ func TestALapFileHasTheFrameSchemaVersionAndV1Columns(t *testing.T) {
 	}
 
 	// The values are the frames', and a missing optional is NULL.
-	got := query(t, `SELECT seq, lap, phase, packet_id, position, track_id FROM read_parquet(?) ORDER BY seq LIMIT 1`, path)
-	if want := [][]string{{"130", "1", "in_race", "5130", "2", "7"}}; !slices.EqualFunc(got, want, slices.Equal) {
+	got := query(t, `SELECT seq, lap, phase, packet_id, position, track_id, car_code FROM read_parquet(?) ORDER BY seq LIMIT 1`, path)
+	if want := [][]string{{"130", "1", "in_race", "5130", "2", "7", "3431"}}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("first frame %q, want %q", got, want)
 	}
 }
@@ -348,7 +349,7 @@ func TestRefusesWhatItCannotStore(t *testing.T) {
 		"a start with no time":                s.StartSession(ctx, &eventsv1.SessionStarted{SessionId: sid}),
 		"a lap of a bad source":               s.WriteLap(ctx, "replay-", good.laps[0], good.frames),
 		"lap 0":                               s.WriteLap(ctx, "live", &eventsv1.LapCompleted{SessionId: sid}, good.frames),
-		"the end of a bad session id":         s.EndSession(ctx, "live", &eventsv1.SessionEnded{SessionId: "x"}),
+		"the end of a bad session id":         s.EndSession(ctx, "live", &eventsv1.SessionEnded{SessionId: "x"}, good.endedAt),
 	} {
 		if err == nil {
 			t.Errorf("%s: no error", name)
@@ -357,7 +358,7 @@ func TestRefusesWhatItCannotStore(t *testing.T) {
 	if err := s.WriteLap(ctx, "live", good.laps[0], good.frames); !errors.Is(err, ErrUnknownSession) {
 		t.Errorf("a lap of an unknown session: %v, want ErrUnknownSession", err)
 	}
-	if err := s.EndSession(ctx, "live", good.ended); !errors.Is(err, ErrUnknownSession) {
+	if err := s.EndSession(ctx, "live", good.ended, good.endedAt); !errors.Is(err, ErrUnknownSession) {
 		t.Errorf("the end of an unknown session: %v, want ErrUnknownSession", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sessions")); !errors.Is(err, os.ErrNotExist) {
@@ -368,24 +369,72 @@ func TestRefusesWhatItCannotStore(t *testing.T) {
 	}
 }
 
-// The end of a session keeps its first end time, and with no finishing position
-// takes the last lap's.
+// The end of a session keeps its first end time and reason, and with no finishing
+// position takes the last lap's.
 func TestEndingASessionAgainKeepsItsEnd(t *testing.T) {
 	s := open(t, t.TempDir())
 	sess := race("live", sid)
 	sess.laps[2].Position = proto.Int32(5)
 	sess.ended.Reason = eventsv1.EndReason_END_REASON_QUIT
 	sess.write(t, s)
-	first := rowsOf(t, t.Context(), s.index, `SELECT ended_at, final_position, end_reason FROM sessions`)
-	if err := s.EndSession(t.Context(), "live", sess.ended); err != nil {
+	const row = `SELECT ended_at, final_position, end_reason FROM sessions`
+	first := rowsOf(t, t.Context(), s.index, row)
+	again := proto.Clone(sess.ended).(*eventsv1.SessionEnded)
+	again.Reason = eventsv1.EndReason_END_REASON_ENGINEER_STOPPED
+	again.Summary.FinishingPosition = proto.Int32(1)
+	if err := s.EndSession(t.Context(), "live", again, sess.endedAt.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	again := rowsOf(t, t.Context(), s.index, `SELECT ended_at, final_position, end_reason FROM sessions`)
-	if !slices.EqualFunc(first, again, slices.Equal) {
-		t.Errorf("ending again changed the row: %q to %q", first, again)
+	if got := rowsOf(t, t.Context(), s.index, row); !slices.EqualFunc(first, got, slices.Equal) {
+		t.Errorf("ending again changed the row: %q to %q", first, got)
 	}
-	if first[0][1] != "5" || first[0][2] != "quit" {
-		t.Errorf("final position %s, reason %s; want 5 (the last lap's), quit", first[0][1], first[0][2])
+	if want := []string{"2026-10-15T19:35:00Z", "5", "quit"}; !slices.Equal(first[0], want) {
+		t.Errorf("ended_at, final position, reason %q; want %q (the last lap's position)", first[0], want)
+	}
+	if err := s.EndSession(t.Context(), "live", sess.ended, time.Time{}); err == nil {
+		t.Error("an end with no time was accepted")
+	}
+}
+
+// Once a session has ended its summary is the event's: a lap written after the end,
+// late or redelivered, writes its row but leaves the session's summary alone. Here
+// the summary's best lap is not the fastest complete lap, as v1 leaves lap 1 out of
+// a lap race.
+func TestALapAfterTheEndLeavesTheSummaryAlone(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race("live", sid)
+	sess.ended.Summary.BestLap = proto.Int32(2)
+	sess.ended.Summary.BestLapTimeMs = proto.Int32(98_200)
+	sess.ended.Summary.FinishingPosition = nil
+	late := sess.laps[2]
+	sess.laps = sess.laps[:2]
+	sess.write(t, s)
+	const row = `SELECT laps_completed, best_lap_ms, final_position, end_reason, ended_at FROM sessions`
+	ended := rowsOf(t, t.Context(), s.index, row)
+	if want := []string{"2", "98200", "2", "finished", "2026-10-15T19:35:00Z"}; !slices.Equal(ended[0], want) {
+		t.Fatalf("summary %q, want %q", ended[0], want)
+	}
+
+	// Lap 1 again, and lap 3 for the first time, after the end.
+	for _, lap := range []*eventsv1.LapCompleted{sess.laps[0], late} {
+		if err := s.WriteLap(t.Context(), "live", lap, sess.frames); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := rowsOf(t, t.Context(), s.index, row); !slices.EqualFunc(got, ended, slices.Equal) {
+		t.Errorf("a lap after the end changed the summary: %q to %q", ended, got)
+	}
+	laps, err := s.Laps(t.Context(), "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(laps) != 3 {
+		t.Errorf("%d laps, want 3: the late lap has its row", len(laps))
+	}
+	// The fuel is the laps', so it takes the late lap in.
+	fuel := rowsOf(t, t.Context(), s.index, `SELECT fuel_used FROM sessions`)
+	if want := fmt.Sprint(roundTo3(sess.laps[0].GetFuelUsed() + sess.laps[1].GetFuelUsed() + late.GetFuelUsed())); fuel[0][0] != want {
+		t.Errorf("fuel used %s, want %s", fuel[0][0], want)
 	}
 }
 

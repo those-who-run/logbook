@@ -69,7 +69,7 @@ func TestAWriteTheIndexRefusesIsReported(t *testing.T) {
 	if err := s.WriteLap(ctx, "live", sess.laps[0], sess.frames); err == nil {
 		t.Error("WriteLap with no laps table succeeded")
 	}
-	if err := s.EndSession(ctx, "live", sess.ended); err == nil {
+	if err := s.EndSession(ctx, "live", sess.ended, sess.endedAt); err == nil {
 		t.Error("EndSession with no laps table succeeded")
 	}
 	if _, err := os.Stat(lapFile(dir, "live", 1)); err != nil {
@@ -161,7 +161,7 @@ func TestACancelledContextWritesNothing(t *testing.T) {
 	if err := s.WriteLap(ctx, "live", sess.laps[0], sess.frames); err == nil {
 		t.Error("WriteLap succeeded")
 	}
-	if err := s.EndSession(ctx, "live", sess.ended); err == nil {
+	if err := s.EndSession(ctx, "live", sess.ended, sess.endedAt); err == nil {
 		t.Error("EndSession succeeded")
 	}
 	if _, err := s.Laps(ctx, "live"); err == nil {

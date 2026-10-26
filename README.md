@@ -34,6 +34,17 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   a lap row also records its frames' top and minimum speed, path length and
   largest single-frame jump. The schema is one ordered list of migrations, run
   at open; an index newer than the code is refused.
+- **A session's summary.** Until a session ends, its complete laps and best
+  lap are worked out from its lap rows. From `session.ended` on, the summary
+  columns (`laps_completed`, `best_lap_ms`, `final_position`, `end_reason`,
+  `ended_at`) are the event's alone: ending it again, or a lap written after
+  the end, leaves them as they were.
+- **`ended_at`** is the end event's own time, which the caller passes:
+  `session.ended`'s `ce-time`, so a replay or a catch-up after a restart
+  records when the session ended, not when `logbook` read it.
+- **`fuel_at_start`** is the first lap's starting fuel. For a session joined
+  part way it can differ from v1's, which was the fuel when the session began,
+  until `session.started` carries the start fuel (Prost).
 - **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
   `seq` range that are in race, and the finished frame that closes a race. Each
   file's key-value metadata records `frame_schema_version`.
