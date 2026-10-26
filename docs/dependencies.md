@@ -27,5 +27,6 @@ the test reads.
 
 | Module | Why |
 | --- | --- |
-
-The module has no direct dependencies yet: the table is empty.
+| `github.com/duckdb/duckdb-go/v2` | DuckDB, embedded: the index (`index.duckdb`) and the Parquet lap files, which DuckDB writes itself (paddock ADR 0007). The official driver, maintained by the DuckDB team since it moved from `marcboeker/go-duckdb` at v2.5.0; MIT. It needs cgo, and brings DuckDB's prebuilt static library through `duckdb-go-bindings` (MIT). |
+| `github.com/those-who-run/contracts` | The v0.1 messages the store writes from: `Frame`, `SessionStarted`, `LapCompleted` and `SessionEnded` (paddock ADR 0002). |
+| `google.golang.org/protobuf` | The runtime the contracts' generated code is written for; the tests build messages with its helpers (`proto.Int32`, `timestamppb`). |

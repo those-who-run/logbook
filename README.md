@@ -11,6 +11,46 @@ names its paddock issue: `Closes those-who-run/paddock#N.` when it meets every
 acceptance criterion, `Part of those-who-run/paddock#N` otherwise
 ([`AGENTS.md`](AGENTS.md)).
 
+## The store
+
+`internal/store` writes a session's events and each lap's frames under one
+data directory, which only `logbook` reads and writes
+([ADR 0007](https://github.com/those-who-run/paddock/blob/main/docs/adr/0007-the-store-engine.md) in paddock):
+
+```text
+logbook.lock                            held by the one process using the directory
+index.duckdb                            the sessions and laps tables
+sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
+```
+
+- **Sources.** Live sessions, replays and parity runs share the index. Every
+  row and every path carries its source, `src`: `live`, `replay-<run>` or
+  `parity`. Readers show `live` unless asked for another.
+- **One process.** Opening the store takes an exclusive lock on
+  `logbook.lock`, and a second process is refused (`ErrBusy`) rather than
+  made to wait.
+- **The index.** `sessions` (keyed by `src` and `id`) and `laps` (keyed by
+  `src`, `session_id` and `lap`). The columns v1's index has keep v1's names;
+  a lap row also records its frames' top and minimum speed, path length and
+  largest single-frame jump. The schema is one ordered list of migrations, run
+  at open; an index newer than the code is refused.
+- **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
+  `seq` range that are in race, and the finished frame that closes a race. Each
+  file's key-value metadata records `frame_schema_version`.
+- **Writes are safe to repeat.** A lap's file is written to a temporary file
+  and renamed, before its row; rows are upserted. Writing the same lap twice
+  leaves the same file, byte for byte, and the same row.
+
+`logbook export --data DIR --laps [--src SRC]` prints the stored laps of one
+source (`live` by default) as JSON lines, one object per lap with the `laps`
+columns, ordered by session start and lap: what the parity harness compares.
+`TWR_DATA_DIR` stands in for `--data`. It takes the lock, so it refuses while
+`logbook` runs on the same directory.
+
+DuckDB needs cgo: the image is built with `CGO_ENABLED=1` and runs from
+distroless's `cc` image, which carries glibc and libstdc++. Building or testing
+on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
+
 ## Checks
 
 `make check` runs what CI runs; [`AGENTS.md`](AGENTS.md) says what that is and

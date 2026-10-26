@@ -1,6 +1,7 @@
 // Command logbook runs the template's example service: it reads its configuration
 // from the environment, logs JSON to standard output and serves GET /healthz until
-// it gets SIGINT or SIGTERM. `logbook -version` prints its version and exits.
+// it gets SIGINT or SIGTERM. `logbook -version` prints its version and exits, and
+// `logbook export --data DIR --laps` prints the stored laps as JSON lines.
 package main
 
 import (
@@ -35,6 +36,9 @@ func main() {
 func run(ctx context.Context, args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if len(args) > 0 && args[0] == "export" {
+		return export(ctx, args[1:], getenv, stdout, stderr)
+	}
 	flags := flag.NewFlagSet("logbook", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print the version and exit")
