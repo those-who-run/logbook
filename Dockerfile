@@ -1,14 +1,14 @@
-# The service's image: built in Go's image, run from distroless's static image as
-# its non-root user. image.yml builds and smoke-tests it on every PR; a release
-# builds it again and image-publish.yml pushes that build. Both base images are
-# pinned by the digest of their multi-platform index (the tag beside it is for
-# people); Renovate bumps the tag and the digest together.
+# The service's image: built in Go's image, run from distroless's cc image as its
+# non-root user. image.yml builds and smoke-tests it on every PR; a release builds it
+# again and image-publish.yml pushes that build. Both base images are pinned by the
+# digest of their multi-platform index (the tag beside it is for people); Renovate
+# bumps the tag and the digest together.
 #
-# A static binary (CGO_ENABLED=0) needs no C library, so the runtime image has
-# none. A component that needs cgo (logbook, for DuckDB: paddock ADR 0007) sets
-# CGO_ENABLED=1 in the build stage and runs from
-# gcr.io/distroless/cc-debian13:nonroot instead, which carries glibc; its go.yml
-# caller passes `cgo: true`.
+# logbook embeds DuckDB (paddock ADR 0007), which needs cgo: the build stage sets
+# CGO_ENABLED=1, links DuckDB's static library with Go's image's C and C++
+# toolchain, and the runtime image is distroless's cc image, which carries glibc
+# and libstdc++ where the template's static image has no C library. Its go.yml
+# caller passes `cgo: true`. chassis and every other Go component stay cgo-free.
 
 FROM docker.io/library/golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS build
 WORKDIR /src
@@ -23,9 +23,9 @@ COPY . .
 # label does; a pull request's image build passes none, and reports `dev`.
 ARG VERSION=dev
 # -trimpath keeps the build machine's paths out of the binary.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/service ./cmd/logbook
+RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/service ./cmd/logbook
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 COPY --from=build /out/service /service
 # distroless's nonroot user (65532), by number so a runtime can check it isn't root.
 USER 65532:65532

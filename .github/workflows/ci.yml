@@ -51,18 +51,20 @@ jobs:
   checks:
     permissions:
       contents: read
-    uses: those-who-run/.github/.github/workflows/checks.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    uses: those-who-run/.github/.github/workflows/checks.yml@6328457b1a763ee250f4326023ee0a5db0ab78cb # v0.2.8
     with:
       go-version-file: go.mod
 
   # gofmt, go mod tidy, go vet, golangci-lint, the tests with the race detector and
   # the coverage floor, go build and govulncheck, as `make check` runs them, behind
   # the Go test guard. The floor is the Makefile's COVERAGE_FLOOR too
-  # (tests/test_go_floor.py keeps the two equal).
+  # (tests/test_go_floor.py keeps the two equal). cgo is on for vet, lint and build:
+  # logbook embeds DuckDB through its cgo driver (paddock ADR 0007).
   go:
     permissions:
       contents: read
       pull-requests: read # the weakened-tests check reads the PR's description
-    uses: those-who-run/.github/.github/workflows/go.yml@07c451475ad96881e9f1cb5c88c8b7d672ddd74b # v0.2.4
+    uses: those-who-run/.github/.github/workflows/go.yml@6328457b1a763ee250f4326023ee0a5db0ab78cb # v0.2.8
     with:
       coverage-floor: 90
+      cgo: true
