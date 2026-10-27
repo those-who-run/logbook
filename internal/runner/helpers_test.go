@@ -30,6 +30,8 @@ import (
 	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/those-who-run/logbook/internal/store"
 )
 
 // The stream definitions in testdata/streams are paddock's deploy/nats/streams at
@@ -123,11 +125,13 @@ type race struct {
 	firstSeq      uint32 // the seq of the first frame published
 	laps          int
 	lapFrames     int
+	start         time.Time // the ce-time of the first frame published
 	endedAt       time.Time
 }
 
 func newRace(src, run, sid string) race {
 	return race{src: src, run: run, sid: sid, carCode: 3431, firstSeq: 0, laps: 3, lapFrames: 300,
+		start:   time.Date(2026, 10, 15, 19, 30, 0, 0, time.UTC),
 		endedAt: time.Date(2026, 10, 15, 19, 40, 0, 0, time.UTC)}
 }
 
@@ -149,8 +153,7 @@ type raceMessages struct {
 func (r race) messages() raceMessages {
 	var out raceMessages
 	seq := r.firstSeq
-	start := time.Date(2026, 10, 15, 19, 30, 0, 0, time.UTC)
-	at := func(s uint32) time.Time { return start.Add(time.Duration(s) * time.Second / 60) }
+	at := func(s uint32) time.Time { return r.start.Add(time.Duration(s-r.firstSeq) * time.Second / 60) }
 	frame := func(lap int32, phase telemetryv1.Phase, i int, fuel float64) {
 		angle := 2 * math.Pi * float64(i) / float64(r.lapFrames)
 		f := &telemetryv1.Frame{
@@ -559,4 +562,54 @@ func heldAddr(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	return ln.Addr().String()
+}
+
+// faultStore is the store with one write made to fail, as a full disk would make
+// it: fail says, before each call, whether that call fails.
+type faultStore struct {
+	storeAPI
+	mu   sync.Mutex
+	fail func(method string, arg any) bool
+}
+
+var errInjected = errors.New("the store refused the write (injected)")
+
+func (f *faultStore) failing(method string, arg any) bool {
+	f.mu.Lock()
+	failed := f.fail(method, arg)
+	f.mu.Unlock()
+	if failed {
+		// A failing disk takes a moment: long enough for an ack sent before the
+		// write, wrongly, to reach the server before logbook stops.
+		time.Sleep(300 * time.Millisecond)
+	}
+	return failed
+}
+
+func (f *faultStore) StageFrames(ctx context.Context, frames []store.StagedFrame) error {
+	if f.failing("StageFrames", frames) {
+		return errInjected
+	}
+	return f.storeAPI.StageFrames(ctx, frames)
+}
+
+func (f *faultStore) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (int, int, error) {
+	if f.failing("WriteStagedLap", lap) {
+		return 0, 0, errInjected
+	}
+	return f.storeAPI.WriteStagedLap(ctx, src, lap)
+}
+
+// failingOnce makes the call fail the first time when says it should.
+func failingOnce(when func(method string, arg any) bool) func(storeAPI) storeAPI {
+	done := false
+	return func(s storeAPI) storeAPI {
+		return &faultStore{storeAPI: s, fail: func(method string, arg any) bool {
+			if done || !when(method, arg) {
+				return false
+			}
+			done = true
+			return true
+		}}
+	}
 }

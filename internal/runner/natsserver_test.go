@@ -2,6 +2,7 @@ package runner
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -9,13 +10,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,6 +45,9 @@ var natsSHA256 = map[string]string{
 var natsBinary string
 
 func TestMain(m *testing.M) {
+	if os.Getenv(childEnv) != "" {
+		os.Exit(runChild())
+	}
 	bin, err := findNATSServer()
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "nats-server:", err)
@@ -74,8 +81,14 @@ func findNATSServer() (string, error) {
 	}
 	dir := filepath.Join(cache, "those-who-run", "nats-server-"+natsVersion+"-"+platform)
 	bin := filepath.Join(dir, "nats-server")
-	if _, err := os.Stat(bin); err == nil {
-		return bin, nil
+	archivePath := filepath.Join(dir, "nats-server.tar.gz")
+	// The archive is kept beside the binary and checked on every use, and the
+	// binary taken from it again: a cache someone else can write to is not
+	// trusted as it stands.
+	if archive, err := os.ReadFile(archivePath); err == nil { //nolint:gosec // the tests' own cache
+		if got := sha256.Sum256(archive); hex.EncodeToString(got[:]) == sum {
+			return bin, extract(archive, "nats-server-"+natsVersion+"-"+platform+"/nats-server", bin)
+		}
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
@@ -101,6 +114,9 @@ func findNATSServer() (string, error) {
 	got := sha256.Sum256(archive)
 	if hex.EncodeToString(got[:]) != sum {
 		return "", fmt.Errorf("%s has sha256 %x, want %s", url, got, sum)
+	}
+	if err := os.WriteFile(archivePath, archive, 0o600); err != nil {
+		return "", err
 	}
 	return bin, extract(archive, name+"/nats-server", bin)
 }
@@ -193,4 +209,55 @@ func startNATS(t *testing.T, port int) *natsServer {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// The environment of a logbook the tests run as a process of its own, to kill it
+// with SIGKILL: a real crash, with no clean close of the store or the connection.
+const (
+	childEnv     = "LOGBOOK_TEST_CHILD"
+	childNATS    = "LOGBOOK_TEST_NATS"
+	childData    = "LOGBOOK_TEST_DATA"
+	childKillLap = "LOGBOOK_TEST_KILL_LAP"
+)
+
+// runChild is the test binary as that process: it runs logbook, and kills itself
+// with SIGKILL just before it writes lap LOGBOOK_TEST_KILL_LAP.
+func runChild() int {
+	cfg := testConfig(os.Getenv(childNATS), os.Getenv(childData))
+	kill, _ := strconv.Atoi(os.Getenv(childKillLap))
+	cfg.beforeLapWrite = func(_, _ string, lap int32) error {
+		if int(lap) == kill {
+			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			select {}
+		}
+		return nil
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	if err := Run(context.Background(), cfg, logger, "child"); err != nil {
+		return 1
+	}
+	return 0
+}
+
+// startChild runs logbook as a process of its own, its log going to logs.
+func startChild(t *testing.T, url, dir string, killLap int, l *logs) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // this test binary
+	cmd.Env = append(os.Environ(), childEnv+"=1", childNATS+"="+url, childData+"="+dir,
+		childKillLap+"="+strconv.Itoa(killLap))
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		sc := bufio.NewScanner(out)
+		for sc.Scan() {
+			_, _ = l.Write(slices.Clone(sc.Bytes()))
+		}
+	}()
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	return cmd
 }
