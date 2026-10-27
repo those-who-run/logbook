@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/those-who-run/logbook/compare/v0.1.2...v0.1.3) (2026-10-27)
+
+
+### Bug Fixes
+
+* **logbook:** review fixes for the subscriber ([#15](https://github.com/those-who-run/logbook/issues/15)) ([1dfcfa4](https://github.com/those-who-run/logbook/commit/1dfcfa4ab221535e32d68cecacee3dfcb74193b7))
+
 ## [0.1.2](https://github.com/those-who-run/logbook/compare/v0.1.1...v0.1.2) (2026-10-27)
 
 
