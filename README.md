@@ -86,21 +86,28 @@ number of sessions in its store and its schema version.
   is the session's `first_seq` and whose `ce-time` is its `started_at`; the
   session takes that frame's ecu run (from its `ce-id`, `<run>:frame:<seq>`).
   ecu drops frames while its connection is down, so if that frame is missing
-  the session takes the run of the earliest later frame that fits its start: a
-  `ce-time` no earlier than `started_at`, and within 5 s (and 1 % of the time
-  since the start) of where a 60 Hz run from that start puts its `seq`. An
-  older run's frames are before `started_at`, and a newer run's seqs start
-  again, so neither fits. Each fetched batch is placed: a frame goes to the open session of its source
-  and its run whose first `seq` is the latest at or before its own. The batch
-  is staged in `frames_pending` and acked once that commits. A frame outside
-  every open session is acked and not staged.
+  the session takes the run of the earliest frame that fits its start: one of
+  its first 1,800 frames by `seq` (30 s at 60 Hz), with a `ce-time` no earlier
+  than `started_at` and within 5 s of where a 60 Hz run from that start puts
+  it. An older run's frames are before `started_at`, and an earlier session of
+  a run still going is too far back by `seq`, so neither fits. A newer run that
+  starts within a few seconds of a session's start can fit, so a fitting frame
+  never takes a session from the run its first frame gave it, and a session
+  already on the frame's run takes the frame first. A session with none of its
+  first 30 s of frames gets no run, and its laps are skipped as gone (below).
+  Each fetched batch is placed: of the open sessions of its source whose first
+  `seq` is at or before its own, latest first, the frame goes to the first one
+  that is on its run, or has no run yet and whose first frame it is or fits.
+  The batch is staged in `frames_pending` and acked once that commits. A frame
+  outside every open session is acked and not staged.
 - **Read-back.** The two streams are read apart, so a session's first frames
   can pass through before its `session.started` does. When a session opens
   without its first frame, logbook reads its source back from `TELEMETRY`
   with an ephemeral ordered consumer, from 1 min before `started_at` up to the
   last frame its own consumer has been given, and stages the run's frames from
-  the first frame on. Where two runs have frames that fit (two replays of one
-  recording under one source), it takes the later. A stop is checked between
+  the first frame on, or failing it from the earliest frame that fits. Where
+  two runs carry the first frame itself (two replays of one recording under
+  one source), it takes the later. A stop is checked between
   fetches, and the ordered consumer is deleted when the read is done.
 - **Events.** `session.started` opens the session. `lap.completed` waits
   until a frame at or beyond the lap's `last_seq` is staged, then the lap is
@@ -110,9 +117,10 @@ number of sessions in its store and its schema version.
   `lap.completed` that comes after its session's end has been applied still
   writes its row and leaves the summary as the end made it. The session's
   staged frames went at the end, so the lap's frames are read back from
-  `TELEMETRY`; those the stream no longer holds are missing. Each event is acked after its
-  write commits. Any other type is acked and ignored. One that cannot be read,
-  or a lap or end of a session never started, is dropped with a warning.
+  `TELEMETRY`; those the stream no longer holds are missing. Each event is
+  acked after its write commits. Any other type is acked and ignored. One that
+  cannot be read, or a lap or end of a session never started, is dropped with a
+  warning.
 - **Missing frames.** A lap whose frames stop coming is written after the
   frames timeout with those there are: its row's `frames` says how many, and a
   warning, `lap written without all its frames`, names the source, session, lap

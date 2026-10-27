@@ -441,6 +441,9 @@ func (c *consumer) readSource(ctx context.Context, src string, from time.Time, l
 		}
 	}()
 	for {
+		if c.cfg.beforeReadFetch != nil {
+			c.cfg.beforeReadFetch()
+		}
 		if c.stop.Err() != nil {
 			return errStopped
 		}
@@ -472,13 +475,15 @@ func (c *consumer) readSource(ctx context.Context, src string, from time.Time, l
 // readBack reads the session's source back from a little before its started_at
 // up to the last frame logbook's own consumer has been given; later frames come
 // to that consumer and are placed as they come. If the session's first frame is
-// there, or failing it the earliest that fits its start (fits), the session takes
-// that frame's run, and the run's frames from it on are staged. Where two runs
-// have frames that fit, as two replays of one recording under one source would,
-// the later run is taken.
+// there, the session takes that frame's run, and the run's frames from it on are
+// staged; failing it, the run of the earliest frame that fits its start
+// (fitsStart). A run bound by the first frame is never replaced by one that only
+// fits. Where two runs carry the first frame itself, as two replays of one
+// recording under one source do, the later is taken.
 func (c *consumer) readBack(ctx context.Context, s *session, last uint64) error {
 	var (
 		run   string
+		exact bool // run came from the session's first frame itself
 		found []*telemetryv1.Frame
 	)
 	err := c.readSource(ctx, s.src, s.startedAt.Add(-readBackMargin), last,
@@ -486,7 +491,14 @@ func (c *consumer) readBack(ctx context.Context, s *session, last uint64) error 
 			switch {
 			case run != "" && r == run:
 				found = append(found, f)
-			case s.fits(f.GetSeq(), at):
+			case s.isFirst(f.GetSeq(), at):
+				// The first frame itself. Another run's can match only as a copy:
+				// a replay of the same recording under the same source, which is
+				// published after it, so the later is the session's own.
+				run, exact, found = r, true, []*telemetryv1.Frame{f}
+			case run == "" && !exact && s.fitsStart(f.GetSeq(), at):
+				// The earliest frame that fits; a later run that fits too never
+				// replaces it.
 				run, found = r, []*telemetryv1.Frame{f}
 			}
 		})
@@ -510,21 +522,29 @@ func (c *consumer) readBack(ctx context.Context, s *session, last uint64) error 
 	return nil
 }
 
-// fitSlack is how far a frame's ce-time may be from where the session's start puts
-// it, before 1 % of the time since the start is added for a packet rate a little
-// off 60 Hz.
-const fitSlack = 5 * time.Second
+// The fallback for a session whose first frame is missing (fitsStart): a frame
+// within its first fitFrames frames (30 s at 60 Hz), whose ce-time is within
+// fitSlack of where the session's start puts it.
+const (
+	fitFrames = 1800
+	fitSlack  = 5 * time.Second
+)
 
-// fits is whether a frame of the session's source, with seq and ce-time at, can be
-// of the session's run: the session's first frame (its seq is first_seq and its
-// ce-time started_at), or a later one whose ce-time is where a 60 Hz run that began
-// with that frame puts it. ecu drops frames while its connection is down, so the
-// first frame itself may be missing. A frame of another run has a ce-time far from
-// that: an older run's are before started_at, and a newer run starts its seqs
-// again.
-func (s *session) fits(seq uint32, at time.Time) bool {
+// isFirst is whether a frame of the session's source, with seq and ce-time at, is
+// the session's first frame: its seq is first_seq and its ce-time started_at.
+func (s *session) isFirst(seq uint32, at time.Time) bool {
+	return seq == s.firstSeq && at.UTC().Truncate(time.Microsecond).Equal(s.startedAt)
+}
+
+// fitsStart is whether a frame can stand for a session's missing first frame. ecu
+// drops frames while its connection is down, so the first frame itself may be
+// missing. A frame fits when it is one of the session's first fitFrames frames by
+// seq and its ce-time is no earlier than started_at and within fitSlack of where a
+// 60 Hz run from the first frame puts its seq. The bound keeps an earlier session
+// of a run that is still going from fitting that run's current frames.
+func (s *session) fitsStart(seq uint32, at time.Time) bool {
 	at = at.UTC().Truncate(time.Microsecond)
-	if seq < s.firstSeq || at.Before(s.startedAt) {
+	if seq < s.firstSeq || seq-s.firstSeq > fitFrames || at.Before(s.startedAt) {
 		return false
 	}
 	want := s.startedAt.Add(time.Duration(seq-s.firstSeq) * time.Second / 60)
@@ -532,7 +552,7 @@ func (s *session) fits(seq uint32, at time.Time) bool {
 	if off < 0 {
 		off = -off
 	}
-	return off <= fitSlack+at.Sub(s.startedAt)/100
+	return off <= fitSlack
 }
 
 // nextFirstSeq is the first seq of the next session of s's source and run, where
@@ -698,26 +718,32 @@ func (c *consumer) stage(ctx context.Context, msgs []jetstream.Msg) error {
 }
 
 // place is the open session of src a frame of run, with seq and ce-time at, belongs
-// to. The first frame that fits a session with no run yet gives it its run. Any other frame
-// goes to the session of its own run whose frames start latest at or before seq.
+// to. Of the source's sessions whose frames start at or before seq, latest first:
+// one bound to the frame's run takes it; one with no run yet takes it, and the
+// run, if the frame is its first frame or fits its start (fitsStart); one bound to
+// another run is passed over. So a session whose first frame is still to come
+// takes it from an earlier session of the same run, and a session that only fits
+// never takes a frame its run's own session would.
 func (c *consumer) place(src, run string, seq uint32, at time.Time) *session {
-	var best *session
+	var candidates []*session
 	for _, s := range c.open {
-		if s.src != src {
-			continue
+		if s.src == src && s.firstSeq <= seq {
+			candidates = append(candidates, s)
 		}
-		if s.run == "" && s.fits(seq, at) {
+	}
+	slices.SortFunc(candidates, func(a, b *session) int {
+		return cmp.Or(cmp.Compare(b.firstSeq, a.firstSeq), cmp.Compare(b.order, a.order))
+	})
+	for _, s := range candidates {
+		switch {
+		case run != "" && s.run == run:
+			return s
+		case s.run == "" && (s.isFirst(seq, at) || s.fitsStart(seq, at)):
 			s.run, s.readBack = run, false
 			return s
 		}
-		if s.run != run || s.firstSeq > seq {
-			continue
-		}
-		if best == nil || s.firstSeq > best.firstSeq || (s.firstSeq == best.firstSeq && s.order > best.order) {
-			best = s
-		}
 	}
-	return best
+	return nil
 }
 
 // settle writes every lap that is ready, in order, and then the end of every

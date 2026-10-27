@@ -82,6 +82,8 @@ type Config struct {
 	beforeLapWrite func(src, sessionID string, lap int32) error
 	// afterLapWrite is the same after the lap's commit and before its ack.
 	afterLapWrite func(src, sessionID string, lap int32) error
+	// beforeReadFetch, when set, runs before each fetch of a read-back.
+	beforeReadFetch func()
 	// wrapStore, when set, stands in front of the store, to make a write fail.
 	wrapStore func(storeAPI) storeAPI
 }
