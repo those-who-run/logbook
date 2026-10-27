@@ -3,12 +3,16 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
 
@@ -198,6 +202,13 @@ func TestALapAfterTheEndIsAppliedWritesItsRow(t *testing.T) {
 	if len(snap.laps) != 3 || snap.sessions[0][8] != "2" || snap.sessions[0][9] != "98100" {
 		t.Errorf("laps %q, session %q", snap.laps, snap.sessions)
 	}
+	// Its frames were dropped with the session's at the end; they are read back.
+	if len(snap.laps) == 3 && snap.laps[1][11] != strconv.Itoa(r.lapFrames) {
+		t.Errorf("the late lap 2 holds %s frames, want %d", snap.laps[1][11], r.lapFrames)
+	}
+	if snap.staged != 0 {
+		t.Errorf("%d frames left staged", snap.staged)
+	}
 }
 
 // N4: nothing is acked before its commit. A batch of frames whose staging fails,
@@ -270,5 +281,196 @@ func TestAMessageTheStoreAlwaysRefusesIsDropped(t *testing.T) {
 	}
 	if snap := takeSnapshot(t, dir); len(snap.laps) != r.laps-1 {
 		t.Errorf("%d laps, want all but lap 2", len(snap.laps))
+	}
+}
+
+// B-1: a session whose first frame never reached TELEMETRY (ecu drops frames
+// while its connection is down) takes its run from the earliest frame that fits
+// its start, and loses that one frame only.
+func TestASessionWithoutItsFirstFrameKeepsItsLaps(t *testing.T) {
+	r := newRace("live", runA, sidA)
+	clean, msgs, _ := replay(t, r)
+	first := msgs.started.GetFirstSeq()
+	var sent []published
+	for _, p := range msgs.msgs {
+		if f, ok := p.msg.(*telemetryv1.Frame); ok && f.GetSeq() == first {
+			continue
+		}
+		sent = append(sent, p)
+	}
+	for name, order := range map[string]func(t *testing.T, js jetstream.JetStream, srv *natsServer){
+		"events with the frames": func(t *testing.T, js jetstream.JetStream, _ *natsServer) {
+			publish(t, js, sent, false)
+		},
+		"frames before events, read back": func(t *testing.T, js jetstream.JetStream, srv *natsServer) {
+			var frames, events []published
+			for _, p := range sent {
+				if _, ok := p.msg.(*telemetryv1.Frame); ok {
+					frames = append(frames, p)
+				} else {
+					events = append(events, p)
+				}
+			}
+			publish(t, js, frames, false)
+			waitStreamRead(t, js, srv)
+			publish(t, js, events, false)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, js := testServer(t)
+			dir := t.TempDir()
+			in := start(t, testConfig(srv.ClientURL(), dir))
+			order(t, js, srv)
+			in.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
+			if err := in.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			snap := takeSnapshot(t, dir)
+			if len(snap.laps) != r.laps {
+				t.Fatalf("%d laps written, want %d", len(snap.laps), r.laps)
+			}
+			if got := snap.laps[0][11]; got != strconv.Itoa(r.lapFrames-1) {
+				t.Errorf("lap 1 holds %s frames, want all but the first, %d", got, r.lapFrames-1)
+			}
+			if !slices.Equal(snap.laps[1], clean.laps[1]) || !slices.Equal(snap.laps[2], clean.laps[2]) {
+				t.Errorf("laps 2 and 3 %q differ from a clean run's %q", snap.laps[1:], clean.laps[1:])
+			}
+			if snap.sessions[0][14] != runA {
+				t.Errorf("the session's run is %q", snap.sessions[0][14])
+			}
+		})
+	}
+}
+
+// N-B: a session's end waits for a missing lap for an ack wait and a frames
+// timeout from its own arrival, though frames go on coming after the race.
+func TestAnEndWaitsNoLongerWhileFramesFlow(t *testing.T) {
+	r := newRace("live", runA, sidA)
+	msgs := r.messages()
+	var sent []published
+	lastSeq := uint32(0)
+	for _, p := range msgs.msgs {
+		if l, ok := p.msg.(*eventsv1.LapCompleted); ok && l.GetLap() == 2 {
+			continue
+		}
+		if f, ok := p.msg.(*telemetryv1.Frame); ok {
+			lastSeq = f.GetSeq()
+		}
+		sent = append(sent, p)
+	}
+	srv, js := testServer(t)
+	dir := t.TempDir()
+	cfg := testConfig(srv.ClientURL(), dir)
+	in := start(t, cfg)
+	publish(t, js, sent, false)
+	// The menus after the race: a frame every 100 ms for up to 30 s.
+	began := time.Now()
+	deadline := began.Add(30 * time.Second)
+	at := r.endedAt
+	for seq := lastSeq + 1; time.Now().Before(deadline); seq++ {
+		if len(in.logs.find("session ended", map[string]any{"session": sidA})) > 0 {
+			if waited := time.Since(began); waited > cfg.ackWait+cfg.FramesTimeout+5*time.Second {
+				t.Errorf("the end waited %v while frames flowed, want about %v", waited, cfg.ackWait+cfg.FramesTimeout)
+			}
+			if err := in.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		at = at.Add(100 * time.Millisecond)
+		publish(t, js, []published{{subject: "twr.v1.live.frame.gt7", id: fmt.Sprintf("%s:frame:%d", runA, seq), at: at,
+			msg: &telemetryv1.Frame{Seq: seq, Phase: telemetryv1.Phase_PHASE_FINISHED}}}, false)
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("the session had not ended after 30 s of frames")
+}
+
+// N-E, B3: after a stop no new write starts. Three laps are ready in one round;
+// a stop during the first leaves the other two, and the end, for the next start.
+func TestAStopStartsNoNewWrite(t *testing.T) {
+	r := newRace("live", runA, sidA)
+	r.lapFrames = 100 // every lap in one batch of frames, so all are ready at once
+	srv, js := testServer(t)
+	dir := t.TempDir()
+	cfg := testConfig(srv.ClientURL(), dir)
+	var running atomic.Pointer[instance]
+	cfg.beforeLapWrite = func(_, _ string, lap int32) error {
+		if lap != 1 {
+			return nil
+		}
+		for running.Load() == nil {
+			time.Sleep(time.Millisecond) // until start has returned
+		}
+		running.Load().cancel()
+		return nil
+	}
+	// All of it before logbook starts, so the first round finds every lap ready.
+	publish(t, js, r.messages().msgs, false)
+	in := start(t, cfg)
+	running.Store(in)
+	if err := in.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(in.logs.find("lap written", nil)); got != 1 {
+		t.Errorf("%d laps written after the stop came during lap 1, want only lap 1", got)
+	}
+	if got := in.logs.find("session ended", nil); len(got) != 0 {
+		t.Error("the session was ended after the stop")
+	}
+	cfg.beforeLapWrite = nil
+	again := start(t, cfg)
+	again.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
+	if err := again.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if snap := takeSnapshot(t, dir); len(snap.laps) != r.laps {
+		t.Errorf("%d laps, want %d", len(snap.laps), r.laps)
+	}
+}
+
+// onStart is the store with a callback before each session's start.
+type onStart struct {
+	storeAPI
+	before func()
+}
+
+func (o *onStart) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) error {
+	o.before()
+	return o.storeAPI.StartSession(ctx, ev)
+}
+
+// A stop while logbook works through waiting events finishes the event in hand
+// and hands the rest back, for the next start to handle.
+func TestAStopPartWayThroughTheEventsHandsTheRestBack(t *testing.T) {
+	a, b := newRace("replay-one", runA, sidA), newRace("replay-two", runB, sidB)
+	srv, js := testServer(t)
+	publish(t, js, slices.Concat(a.messages().msgs, b.messages().msgs), false)
+	dir := t.TempDir()
+	cfg := testConfig(srv.ClientURL(), dir)
+	var running atomic.Pointer[instance]
+	cfg.wrapStore = func(s storeAPI) storeAPI {
+		return &onStart{storeAPI: s, before: func() {
+			for running.Load() == nil {
+				time.Sleep(time.Millisecond) // until start has returned
+			}
+			running.Load().cancel()
+		}}
+	}
+	in := start(t, cfg)
+	running.Store(in)
+	if err := in.wait(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(in.logs.find("session started", nil)); got != 1 {
+		t.Errorf("%d sessions started after the stop came during the first, want 1", got)
+	}
+	again := start(t, testConfig(srv.ClientURL(), dir))
+	again.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
+	again.logs.await(t, 1, "session ended", map[string]any{"session": sidB})
+	if err := again.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	if snap := takeSnapshot(t, dir); len(snap.laps) != a.laps+b.laps {
+		t.Errorf("%d laps, want %d", len(snap.laps), a.laps+b.laps)
 	}
 }

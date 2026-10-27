@@ -222,24 +222,37 @@ FROM sessions s WHERE s.ended_at IS NULL ORDER BY s.started_at, s.src, s.id`)
 	return out, nil
 }
 
+// SessionInfo is what the index says of a session.
+type SessionInfo struct {
+	State SessionState
+	// Run is the run its frames came from, "" when none was ever staged.
+	Run       string
+	StartedAt time.Time
+}
+
 // Session says whether src's session id is in the index, whether it has ended,
-// and the run its frames came from ("" when none was ever staged).
-func (s *Store) Session(ctx context.Context, src, sessionID string) (SessionState, string, error) {
+// its run and when it started.
+func (s *Store) Session(ctx context.Context, src, sessionID string) (SessionInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var ended sql.NullTime
-	var run sql.NullString
-	err := s.index.QueryRowContext(ctx, `SELECT ended_at, run FROM sessions WHERE src = ? AND id = ?`,
-		sourceOf(src), sessionID).Scan(&ended, &run)
+	var (
+		ended   sql.NullTime
+		run     sql.NullString
+		started time.Time
+	)
+	err := s.index.QueryRowContext(ctx, `SELECT ended_at, run, started_at FROM sessions WHERE src = ? AND id = ?`,
+		sourceOf(src), sessionID).Scan(&ended, &run, &started)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return SessionUnknown, "", nil
+		return SessionInfo{State: SessionUnknown}, nil
 	case err != nil:
-		return SessionUnknown, "", fmt.Errorf("store: session %s/%s: %w", src, sessionID, err)
-	case ended.Valid:
-		return SessionEnded, run.String, nil
+		return SessionInfo{}, fmt.Errorf("store: session %s/%s: %w", src, sessionID, err)
 	}
-	return SessionOpen, run.String, nil
+	info := SessionInfo{State: SessionOpen, Run: run.String, StartedAt: started.UTC()}
+	if ended.Valid {
+		info.State = SessionEnded
+	}
+	return info, nil
 }
 
 // LapsWritten returns the numbers of the laps src's session has rows for, in order.

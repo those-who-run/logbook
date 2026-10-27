@@ -171,8 +171,12 @@ func TestOpenSessionsAndTheirRuns(t *testing.T) {
 		want    SessionState
 		run     string
 	}{{"live", sid, SessionEnded, run}, {"replay-x", b.started.GetSessionId(), SessionOpen, ""}, {"parity", sid, SessionUnknown, ""}} {
-		if got, r, err := s.Session(ctx, c.src, c.id); err != nil || got != c.want || r != c.run {
-			t.Errorf("Session(%s, %s) = %v, %q, %v; want %v, %q", c.src, c.id, got, r, err, c.want, c.run)
+		got, err := s.Session(ctx, c.src, c.id)
+		if err != nil || got.State != c.want || got.Run != c.run {
+			t.Errorf("Session(%s, %s) = %+v, %v; want %v, %q", c.src, c.id, got, err, c.want, c.run)
+		}
+		if c.want != SessionUnknown && !got.StartedAt.Equal(a.started.GetStartedAt().AsTime()) {
+			t.Errorf("Session(%s, %s) started at %v", c.src, c.id, got.StartedAt)
 		}
 	}
 	if n, err := s.Sessions(ctx); err != nil || n != 2 {
@@ -228,7 +232,7 @@ func TestStagingRefusesWhatItCannotStore(t *testing.T) {
 			return err
 		}(),
 		"Session": func() error {
-			_, _, err := closed.Session(ctx, "live", sid)
+			_, err := closed.Session(ctx, "live", sid)
 			return err
 		}(),
 		"LapsWritten": func() error {

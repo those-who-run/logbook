@@ -85,7 +85,12 @@ number of sessions in its store and its schema version.
 - **Frames.** A session's first frame is the frame of its source whose `seq`
   is the session's `first_seq` and whose `ce-time` is its `started_at`; the
   session takes that frame's ecu run (from its `ce-id`, `<run>:frame:<seq>`).
-  Each fetched batch is placed: a frame goes to the open session of its source
+  ecu drops frames while its connection is down, so if that frame is missing
+  the session takes the run of the earliest later frame that fits its start: a
+  `ce-time` no earlier than `started_at`, and within 5 s (and 1 % of the time
+  since the start) of where a 60 Hz run from that start puts its `seq`. An
+  older run's frames are before `started_at`, and a newer run's seqs start
+  again, so neither fits. Each fetched batch is placed: a frame goes to the open session of its source
   and its run whose first `seq` is the latest at or before its own. The batch
   is staged in `frames_pending` and acked once that commits. A frame outside
   every open session is acked and not staged.
@@ -94,15 +99,18 @@ number of sessions in its store and its schema version.
   without its first frame, logbook reads its source back from `TELEMETRY`
   with an ephemeral ordered consumer, from 1 min before `started_at` up to the
   last frame its own consumer has been given, and stages the run's frames from
-  the first frame on. Where two runs have a matching first frame (two replays
-  of one recording under one source), it takes the later.
+  the first frame on. Where two runs have frames that fit (two replays of one
+  recording under one source), it takes the later. A stop is checked between
+  fetches, and the ordered consumer is deleted when the read is done.
 - **Events.** `session.started` opens the session. `lap.completed` waits
   until a frame at or beyond the lap's `last_seq` is staged, then the lap is
   written from its staged frames. `session.ended` waits for the laps it counts
-  (`laps_completed`), for at most an ack wait and the frames timeout, then ends
-  the session at its `ce-time`. A `lap.completed` that comes after its
-  session's end has been applied still writes its row, from what is staged,
-  and leaves the summary as the end made it. Each event is acked after its
+  (`laps_completed`), for at most an ack wait and the frames timeout from its
+  own arrival (40 s), then ends the session at its `ce-time`. A
+  `lap.completed` that comes after its session's end has been applied still
+  writes its row and leaves the summary as the end made it. The session's
+  staged frames went at the end, so the lap's frames are read back from
+  `TELEMETRY`; those the stream no longer holds are missing. Each event is acked after its
   write commits. Any other type is acked and ignored. One that cannot be read,
   or a lap or end of a session never started, is dropped with a warning.
 - **Missing frames.** A lap whose frames stop coming is written after the

@@ -26,7 +26,7 @@ import (
 type storeAPI interface {
 	Sessions(ctx context.Context) (int, error)
 	OpenSessions(ctx context.Context) ([]store.OpenSession, error)
-	Session(ctx context.Context, src, sessionID string) (store.SessionState, string, error)
+	Session(ctx context.Context, src, sessionID string) (store.SessionInfo, error)
 	StartSession(ctx context.Context, ev *eventsv1.SessionStarted) error
 	StageFrames(ctx context.Context, frames []store.StagedFrame) error
 	HasLap(ctx context.Context, src, sessionID string, lap int32) (bool, error)
@@ -101,6 +101,9 @@ type consumer struct {
 	events jetstream.Consumer
 	open   map[[2]string]*session
 	opened int
+	// stop is the context a stop cancels, which long reads check between
+	// fetches; writes run on one it does not.
+	stop context.Context
 }
 
 // readBackMargin is how far before a session's started_at the read-back of its
@@ -113,7 +116,8 @@ const readBackMargin = time.Minute
 const giveUpAfter = 5
 
 func newConsumer(cfg Config, st storeAPI, js jetstream.JetStream, h *health, logger *slog.Logger) *consumer {
-	return &consumer{cfg: cfg, st: st, js: js, h: h, log: logger, now: time.Now, open: map[[2]string]*session{}}
+	return &consumer{cfg: cfg, st: st, js: js, h: h, log: logger, now: time.Now, open: map[[2]string]*session{},
+		stop: context.Background()}
 }
 
 // restore loads the sessions the store has open, with their runs and the frames
@@ -150,6 +154,7 @@ func (c *consumer) add(src, id string, firstSeq uint32, startedAt time.Time) *se
 // run consumes until ctx is done, binding the consumers again whenever a fetch
 // fails. A store failure stops it with the error.
 func (c *consumer) run(ctx context.Context) error {
+	c.stop = ctx
 	for {
 		if ctx.Err() != nil {
 			c.release(ctx)
@@ -356,11 +361,11 @@ func (c *consumer) started(ctx context.Context, src string, ev *eventsv1.Session
 	if err := store.CheckKey(src, ev.GetSessionId()); err != nil || ev.GetStartedAt() == nil {
 		return c.drop(ctx, m, errors.Join(err, errIf(ev.GetStartedAt() == nil, "no started_at")))
 	}
-	state, _, err := c.st.Session(ctx, src, ev.GetSessionId())
+	info, err := c.st.Session(ctx, src, ev.GetSessionId())
 	if err != nil {
 		return storeError{err}
 	}
-	if state == store.SessionEnded {
+	if info.State == store.SessionEnded {
 		// A redelivery of a session that has since ended: it changes nothing.
 		return ack(m)
 	}
@@ -372,11 +377,14 @@ func (c *consumer) started(ctx context.Context, src string, ev *eventsv1.Session
 	return ack(m)
 }
 
-// readBacks looks in TELEMETRY for the first frame of every session that has
-// opened without it. The two streams are read apart, so a session's first frames
-// can have passed through logbook, acked and not staged, before its
-// session.started came: they are still in the stream.
+// readBacks looks in TELEMETRY for the first frames of every session that has
+// opened without them. The two streams are read apart, so a session's first
+// frames can have passed through logbook, acked and not staged, before its
+// session.started came: they are still in the stream. A stop leaves the rest for
+// the next start.
 func (c *consumer) readBacks(ctx, wctx context.Context) error {
+	var last uint64
+	asked := false
 	for _, s := range c.sorted() {
 		if !s.readBack || s.run != "" {
 			s.readBack = false
@@ -385,33 +393,40 @@ func (c *consumer) readBacks(ctx, wctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err := c.readBack(wctx, s); err != nil {
-			return err
+		if !asked {
+			// Once a round: how far logbook's own consumer has been given frames.
+			info, err := c.frames.Info(wctx)
+			if err != nil {
+				return err
+			}
+			last, asked = info.Delivered.Stream, true
+		}
+		if last > 0 {
+			err := c.readBack(wctx, s, last)
+			if errors.Is(err, errStopped) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
 		}
 		s.readBack = false
 	}
 	return nil
 }
 
-// readBack reads the session's source in TELEMETRY with an ephemeral ordered
-// consumer, from a little before its started_at up to the last frame logbook's own
-// consumer has been given; later frames come to that consumer and are placed as
-// they come. If the session's first frame is there (its seq and ce-time), the
-// session takes that frame's run and the run's frames from it on are staged.
-// Where two runs carry a matching first frame, as two replays of one recording
-// under one source would, the later one is taken.
-func (c *consumer) readBack(ctx context.Context, s *session) error {
-	info, err := c.frames.Info(ctx)
-	if err != nil {
-		return err
-	}
-	last := info.Delivered.Stream
-	if last == 0 {
-		return nil
-	}
-	from := s.startedAt.Add(-readBackMargin)
+// errStopped is a read of TELEMETRY cut short by a stop.
+var errStopped = errors.New("stopped")
+
+// readSource reads src's frames in TELEMETRY with an ephemeral ordered consumer,
+// from the stream time from up to stream sequence last, and passes each to visit.
+// It checks for a stop between fetches (errStopped), and deletes its consumer when
+// it is done.
+func (c *consumer) readSource(ctx context.Context, src string, from time.Time, last uint64,
+	visit func(run string, at time.Time, f *telemetryv1.Frame),
+) (err error) {
 	oc, err := c.js.OrderedConsumer(ctx, framesStream, jetstream.OrderedConsumerConfig{
-		FilterSubjects:    []string{"twr.v1." + s.src + ".frame.gt7"},
+		FilterSubjects:    []string{"twr.v1." + src + ".frame.gt7"},
 		DeliverPolicy:     jetstream.DeliverByStartTimePolicy,
 		OptStartTime:      &from,
 		InactiveThreshold: 30 * time.Second,
@@ -419,17 +434,22 @@ func (c *consumer) readBack(ctx context.Context, s *session) error {
 	if err != nil {
 		return err
 	}
-	var (
-		run   string
-		found []*telemetryv1.Frame
-	)
-	for done := false; !done; {
+	defer func() {
+		if info := oc.CachedInfo(); info != nil {
+			// The inactive threshold removes it anyway; this is sooner.
+			_ = c.js.DeleteConsumer(ctx, framesStream, info.Name)
+		}
+	}()
+	for {
+		if c.stop.Err() != nil {
+			return errStopped
+		}
 		msgs, err := fetch(oc, framesBatch, 250*time.Millisecond)
 		if err != nil {
 			return err
 		}
 		if len(msgs) == 0 {
-			break
+			return nil
 		}
 		for _, m := range msgs {
 			md, err := m.Metadata()
@@ -437,31 +457,47 @@ func (c *consumer) readBack(ctx context.Context, s *session) error {
 				return err
 			}
 			if md.Sequence.Stream > last {
-				done = true
-				break
+				return nil
 			}
 			var f telemetryv1.Frame
 			e, err := ce.Decode(ce.Header(m.Headers()), m.Data(), &f)
 			if err != nil {
 				continue
 			}
-			r := runOf(e.ID)
-			switch {
-			case s.isFirst(f.GetSeq(), e.Time):
-				run, found = r, []*telemetryv1.Frame{&f}
-			case run != "" && r == run && f.GetSeq() > s.firstSeq:
-				found = append(found, &f)
-			}
+			visit(runOf(e.ID), e.Time, &f)
 		}
 	}
-	if run == "" {
-		return nil
+}
+
+// readBack reads the session's source back from a little before its started_at
+// up to the last frame logbook's own consumer has been given; later frames come
+// to that consumer and are placed as they come. If the session's first frame is
+// there, or failing it the earliest that fits its start (fits), the session takes
+// that frame's run, and the run's frames from it on are staged. Where two runs
+// have frames that fit, as two replays of one recording under one source would,
+// the later run is taken.
+func (c *consumer) readBack(ctx context.Context, s *session, last uint64) error {
+	var (
+		run   string
+		found []*telemetryv1.Frame
+	)
+	err := c.readSource(ctx, s.src, s.startedAt.Add(-readBackMargin), last,
+		func(r string, at time.Time, f *telemetryv1.Frame) {
+			switch {
+			case run != "" && r == run:
+				found = append(found, f)
+			case s.fits(f.GetSeq(), at):
+				run, found = r, []*telemetryv1.Frame{f}
+			}
+		})
+	if err != nil || run == "" {
+		return err
 	}
 	s.run = run
 	until := c.nextFirstSeq(s)
 	var staged []store.StagedFrame
 	for _, f := range found {
-		if until < 0 || int64(f.GetSeq()) < until {
+		if f.GetSeq() >= s.firstSeq && (until < 0 || int64(f.GetSeq()) < until) {
 			staged = append(staged, store.StagedFrame{Src: s.src, SessionID: s.id, Run: run, Frame: f})
 			s.high = max(s.high, int64(f.GetSeq()))
 		}
@@ -474,10 +510,29 @@ func (c *consumer) readBack(ctx context.Context, s *session) error {
 	return nil
 }
 
-// isFirst is whether a frame of the session's source, with seq and ce-time at, is
-// the session's first frame.
-func (s *session) isFirst(seq uint32, at time.Time) bool {
-	return seq == s.firstSeq && at.UTC().Truncate(time.Microsecond).Equal(s.startedAt)
+// fitSlack is how far a frame's ce-time may be from where the session's start puts
+// it, before 1 % of the time since the start is added for a packet rate a little
+// off 60 Hz.
+const fitSlack = 5 * time.Second
+
+// fits is whether a frame of the session's source, with seq and ce-time at, can be
+// of the session's run: the session's first frame (its seq is first_seq and its
+// ce-time started_at), or a later one whose ce-time is where a 60 Hz run that began
+// with that frame puts it. ecu drops frames while its connection is down, so the
+// first frame itself may be missing. A frame of another run has a ce-time far from
+// that: an older run's are before started_at, and a newer run starts its seqs
+// again.
+func (s *session) fits(seq uint32, at time.Time) bool {
+	at = at.UTC().Truncate(time.Microsecond)
+	if seq < s.firstSeq || at.Before(s.startedAt) {
+		return false
+	}
+	want := s.startedAt.Add(time.Duration(seq-s.firstSeq) * time.Second / 60)
+	off := at.Sub(want)
+	if off < 0 {
+		off = -off
+	}
+	return off <= fitSlack+at.Sub(s.startedAt)/100
 }
 
 // nextFirstSeq is the first seq of the next session of s's source and run, where
@@ -520,26 +575,52 @@ func (c *consumer) lap(ctx context.Context, src string, ev *eventsv1.LapComplete
 }
 
 // lateLap is a lap.completed of a session that is not open. Of a session that has
-// ended, it writes the lap's row from whatever is still staged, leaving the
-// session's summary as its end made it; unless no frame of the session ever came,
-// when there is nothing to write. Of a session never started, it is dropped.
+// ended, it writes the lap's row, leaving the session's summary as its end made
+// it: its frames were dropped with the session's at the end, so they are read
+// back from TELEMETRY, with those the stream no longer holds missing. If no frame
+// of the session ever came, there is nothing to write. Of a session never
+// started, it is dropped.
 func (c *consumer) lateLap(ctx context.Context, src string, ev *eventsv1.LapCompleted, m jetstream.Msg) error {
-	state, run, err := c.st.Session(ctx, src, ev.GetSessionId())
+	info, err := c.st.Session(ctx, src, ev.GetSessionId())
 	if err != nil {
 		return storeError{err}
 	}
 	switch {
-	case state == store.SessionUnknown:
+	case info.State == store.SessionUnknown:
 		c.log.WarnContext(ctx, "lap of a session never started; dropped",
 			"src", src, "session", ev.GetSessionId(), "lap", ev.GetLap())
 		return term(m)
-	case run == "":
+	case info.Run == "":
 		c.log.WarnContext(ctx, "lap not written: its session's frames are gone",
 			"src", src, "session", ev.GetSessionId(), "lap", ev.GetLap())
 		return ack(m)
 	}
+	fi, err := c.frames.Info(ctx)
+	if err != nil {
+		return err
+	}
+	var frames []store.StagedFrame
+	err = c.readSource(ctx, src, info.StartedAt.Add(-readBackMargin), fi.Delivered.Stream,
+		func(run string, _ time.Time, f *telemetryv1.Frame) {
+			if run == info.Run && f.GetSeq()+1 >= ev.GetFirstSeq() && f.GetSeq() <= ev.GetLastSeq() {
+				frames = append(frames, store.StagedFrame{Src: src, SessionID: ev.GetSessionId(), Run: run, Frame: f})
+			}
+		})
+	if errors.Is(err, errStopped) {
+		_ = m.Nak() // for the next start
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := c.st.StageFrames(ctx, frames); err != nil {
+		return storeError{err}
+	}
 	staged, written, err := c.st.WriteStagedLap(ctx, src, ev)
 	if err != nil {
+		return storeError{err}
+	}
+	if err := c.st.DropStaged(ctx, src, ev.GetSessionId()); err != nil {
 		return storeError{err}
 	}
 	c.wrote(ctx, src, ev, staged, written, false)
@@ -617,7 +698,7 @@ func (c *consumer) stage(ctx context.Context, msgs []jetstream.Msg) error {
 }
 
 // place is the open session of src a frame of run, with seq and ce-time at, belongs
-// to. A session's first frame (isFirst) gives the session its run. Any other frame
+// to. The first frame that fits a session with no run yet gives it its run. Any other frame
 // goes to the session of its own run whose frames start latest at or before seq.
 func (c *consumer) place(src, run string, seq uint32, at time.Time) *session {
 	var best *session
@@ -625,7 +706,7 @@ func (c *consumer) place(src, run string, seq uint32, at time.Time) *session {
 		if s.src != src {
 			continue
 		}
-		if s.run == "" && s.isFirst(seq, at) {
+		if s.run == "" && s.fits(seq, at) {
 			s.run, s.readBack = run, false
 			return s
 		}
@@ -688,9 +769,11 @@ func (c *consumer) settle(ctx, wctx context.Context) error {
 // lapsMissing is whether a session's end should wait on: its summary counts laps
 // that have no row yet. A lap.completed can come after its session's end, as when
 // both come again after a stop, each at the end of its own ack wait; the end waits
-// for it for an ack wait and a frames timeout, then applies without it.
+// for it for an ack wait and a frames timeout from its own arrival, then applies
+// without it. Frames that go on coming do not extend the wait: a missing event
+// does not depend on them.
 func (c *consumer) lapsMissing(ctx context.Context, s *session, now time.Time) (bool, error) {
-	if !now.Before(later(s.end.since, s.lastFrame).Add(c.cfg.ackWait + c.cfg.FramesTimeout)) {
+	if !now.Before(s.end.since.Add(c.cfg.ackWait + c.cfg.FramesTimeout)) {
 		return false, nil
 	}
 	written, err := c.st.LapsWritten(ctx, s.src, s.id)
