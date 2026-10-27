@@ -36,10 +36,11 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   at open; an index newer than the code is refused.
 - **Staged frames.** `frames_pending` (keyed by `src`, `session_id` and
   `seq`) holds the frames of laps not yet written, each as its protobuf
-  encoding with the ecu run that published it. A lap's write deletes its
-  frames there in the transaction that writes its row; a session's end deletes
-  what is left. A session's `run` is the run of its first staged frame, so a
-  frame of another run never joins it.
+  encoding with the ecu run that published it. A lap's write deletes its own
+  frames there, all but its last, in the transaction that writes its row: the
+  next lap reads that last frame, and an earlier lap written later still finds
+  its own. A session's end deletes what is left. A session's `run` is the run
+  of its first frame, so a frame of another run never joins it.
 - **A session's summary.** Until a session ends, its complete laps and best
   lap are worked out from its lap rows. From `session.ended` on, the summary
   columns (`laps_completed`, `best_lap_ms`, `final_position`, `end_reason`,
@@ -78,33 +79,70 @@ number of sessions in its store and its schema version.
   them to the settings in its code: `logbook-frames` on `TELEMETRY`
   (`twr.v1.*.frame.gt7`, ack all) and `logbook-events` on `EVENTS`
   (`twr.v1.*.evt.>`, ack explicit), both delivering everything the stream
-  holds, with a 30 s ack wait and 1,000 acks pending. The streams themselves
-  come from paddock's bootstrap (`deploy/nats`).
-- **Frames.** Each fetched batch is placed: a frame of source `src` goes to the
-  open session of that source whose first `seq` is the latest at or before its
-  own, among those with no run yet or the frame's run. The batch is staged in `frames_pending` and
-  acked once that commits. A frame outside every open session is acked and not
-  staged; the latest 600 of them per source are kept in memory, so a session
-  whose `session.started` comes after its first frames (the two streams are read
-  apart) claims them when it opens.
-- **Events.** `session.started` opens the session; `lap.completed` waits until a
-  frame at or beyond the lap's `last_seq` is staged, then the lap is written
-  from its staged frames; `session.ended` waits for the session's laps, then
-  ends it at its `ce-time`. Each is acked after its write commits. Any other
-  type is acked and ignored; one that cannot be read, or a lap or end of a
-  session that is not open, is dropped with a warning.
+  holds, with a 30 s ack wait, 1,000 acks pending and at most 20 deliveries of
+  a message. The streams themselves come from paddock's bootstrap
+  (`deploy/nats`).
+- **Frames.** A session's first frame is the frame of its source whose `seq`
+  is the session's `first_seq` and whose `ce-time` is its `started_at`; the
+  session takes that frame's ecu run (from its `ce-id`, `<run>:frame:<seq>`).
+  ecu drops frames while its connection is down, so if that frame is missing
+  the session takes the run of the earliest frame that fits its start: one of
+  its first 1,800 frames by `seq` (30 s at 60 Hz), with a `ce-time` no earlier
+  than `started_at` and within 5 s of where a 60 Hz run from that start puts
+  it. An older run's frames are before `started_at`, and an earlier session of
+  a run still going is too far back by `seq`, so neither fits. A newer run that
+  starts within a few seconds of a session's start can fit, so a fitting frame
+  never takes a session from the run its first frame gave it, and a session
+  already on the frame's run takes the frame first. A session with none of its
+  first 30 s of frames gets no run, and its laps are skipped as gone (below).
+  Each fetched batch is placed: of the open sessions of its source whose first
+  `seq` is at or before its own, latest first, the frame goes to the first one
+  that is on its run, or has no run yet and whose first frame it is or fits.
+  The batch is staged in `frames_pending` and acked once that commits. A frame
+  outside every open session is acked and not staged.
+- **Read-back.** The two streams are read apart, so a session's first frames
+  can pass through before its `session.started` does. When a session opens
+  without its first frame, logbook reads its source back from `TELEMETRY`
+  with an ephemeral ordered consumer, from 1 min before `started_at` up to the
+  last frame its own consumer has been given, and stages the run's frames from
+  the first frame on, or failing it from the earliest frame that fits. Where
+  two runs carry the first frame itself (two replays of one recording under
+  one source), it takes the later. A stop is checked between
+  fetches, and the ordered consumer is deleted when the read is done.
+- **Events.** `session.started` opens the session. `lap.completed` waits
+  until a frame at or beyond the lap's `last_seq` is staged, then the lap is
+  written from its staged frames. `session.ended` waits for the laps it counts
+  (`laps_completed`), for at most an ack wait and the frames timeout from its
+  own arrival (40 s), then ends the session at its `ce-time`. A
+  `lap.completed` that comes after its session's end has been applied still
+  writes its row and leaves the summary as the end made it. The session's
+  staged frames went at the end, so the lap's frames are read back from
+  `TELEMETRY`; those the stream no longer holds are missing. Each event is
+  acked after its write commits. Any other type is acked and ignored. One that
+  cannot be read, or a lap or end of a session never started, is dropped with a
+  warning.
 - **Missing frames.** A lap whose frames stop coming is written after the
   frames timeout with those there are: its row's `frames` says how many, and a
   warning, `lap written without all its frames`, names the source, session, lap
   and how many were missing. The timeout runs from the lap's event or the
   session's last staged frame, whichever is later, so a catch-up that is still
   streaming a lap's frames does not cut it short.
+- **Sessions whose frames are gone.** `TELEMETRY` keeps 2 h of frames and
+  `EVENTS` 30 d of events, so a first start, or one after a long stop, reads
+  sessions whose frames have aged out. A session whose first frame never comes
+  takes no frames at all, and its laps are not written: each is acked with the
+  warning `lap not written: its session's frames are gone`. Its start and end
+  are still recorded.
 - **Restarts.** Nothing is acked before it is committed, so a restart resumes
   from the staged frames and the events not yet acked. A redelivered event
   changes nothing (a lap already written is acked and skipped; the store's
   writes are upserts), and a redelivered frame overwrites its own staged row.
-  On SIGTERM it stops fetching, finishes the write in progress, hands the
-  events it holds back to the server, closes the store and exits 0.
+  A store failure stops logbook with the message unacked; a message the store
+  refuses on 5 deliveries is dropped with the error `the store refused a
+  message on every delivery; dropped`, so it does not stop logbook at every
+  start. On SIGTERM it stops fetching, finishes the write in progress and
+  starts no other, hands the events it holds back to the server, closes the
+  store and exits 0, also when the signal comes while it is starting.
 - **`GET /healthz`** answers 200 while it is connected and both consumers are
   bound, and 503 otherwise, with the same JSON either way: `status`,
   `version`, `connected`, `consumers` (each consumer's name and whether it is
@@ -125,8 +163,10 @@ what a new clone runs first.
 
 The tests of `logbook run` (`internal/runner`) run a real `nats-server -js`
 as a process of its own: the release paddock pins (`v2.15.1`), downloaded
-once from its GitHub release into the user's cache directory and checked
-against the SHA-256 sums in `internal/runner/natsserver_test.go`.
+once from its GitHub release into the user's cache directory, and checked
+against the SHA-256 sums in `internal/runner/natsserver_test.go` on every
+run. AC2's kill is a real one: a test runs logbook as a process of its own
+and kills it with SIGKILL.
 `TWR_TEST_NATS_SERVER` names a binary of that release to use instead. They
 create `TELEMETRY` and `EVENTS` from `internal/runner/testdata/streams`, exact
 copies of paddock's `deploy/nats/streams` at the commit the tests name, which

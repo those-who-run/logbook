@@ -52,6 +52,9 @@ const (
 	eventsBatch   = 100
 	maxAckPending = 1000
 	ackWait       = 30 * time.Second
+	// maxDeliver bounds the deliveries of a message, as a backstop: logbook drops
+	// one the store refuses giveUpAfter times itself, with an error logged.
+	maxDeliver = 20
 )
 
 // Config is what `logbook run` needs.
@@ -79,6 +82,10 @@ type Config struct {
 	beforeLapWrite func(src, sessionID string, lap int32) error
 	// afterLapWrite is the same after the lap's commit and before its ack.
 	afterLapWrite func(src, sessionID string, lap int32) error
+	// beforeReadFetch, when set, runs before each fetch of a read-back.
+	beforeReadFetch func()
+	// wrapStore, when set, stands in front of the store, to make a write fail.
+	wrapStore func(storeAPI) storeAPI
 }
 
 func (c Config) withDefaults() Config {
@@ -114,7 +121,17 @@ const shutdownGrace = 3 * time.Second
 // it answers) and consumes until ctx is done. Then it stops fetching, finishes the
 // write in progress, closes the store and returns nil. It returns an error when the
 // store cannot be opened or written, or the health address cannot be listened on.
-func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (err error) {
+// A stop while it is still starting returns nil too.
+func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) error {
+	err := run(ctx, cfg, logger, version)
+	if err != nil && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		logger.InfoContext(ctx, "stopped while starting")
+		return nil
+	}
+	return err
+}
+
+func run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (err error) {
 	cfg = cfg.withDefaults()
 	if cfg.DataDir == "" {
 		return errors.New("no data directory: pass --data or set TWR_DATA_DIR")
@@ -175,7 +192,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (
 	}
 	h.nc.Store(nc)
 
-	r := newConsumer(cfg, st, js, h, logger)
+	var api storeAPI = st
+	if cfg.wrapStore != nil {
+		api = cfg.wrapStore(api)
+	}
+	r := newConsumer(cfg, api, js, h, logger)
 	// A stop now lets the restore finish; the consumer's first round then stops,
 	// and Run returns nil (R8).
 	if err := r.restore(context.WithoutCancel(ctx)); err != nil {
@@ -204,7 +225,7 @@ func consumerConfigs(wait time.Duration) (frames, events jetstream.ConsumerConfi
 		AckPolicy:     jetstream.AckAllPolicy,
 		AckWait:       wait,
 		MaxAckPending: maxAckPending,
-		MaxDeliver:    -1,
+		MaxDeliver:    maxDeliver,
 	}
 	events = jetstream.ConsumerConfig{
 		Durable:       EventsConsumer,
@@ -214,7 +235,7 @@ func consumerConfigs(wait time.Duration) (frames, events jetstream.ConsumerConfi
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       wait,
 		MaxAckPending: maxAckPending,
-		MaxDeliver:    -1,
+		MaxDeliver:    maxDeliver,
 	}
 	return frames, events
 }

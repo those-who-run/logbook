@@ -3,10 +3,12 @@ package runner
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,41 +100,36 @@ func TestAReplayLeavesItsSessionAndLaps(t *testing.T) {
 	}
 }
 
-// AC2: stopping logbook after lap 2's lap.completed arrives and before it is
-// written, then starting it again, gives the same store as a run with no stop: no
-// lap missing, none twice.
-func TestAStopBeforeALapIsWrittenLosesNothing(t *testing.T) {
+// AC2: killing logbook (SIGKILL, a process of its own) after lap 2's
+// lap.completed arrives and before it is written, then starting it again, gives
+// the same store as a run with no kill: no lap missing, none twice.
+func TestAKillBeforeALapIsWrittenLosesNothing(t *testing.T) {
 	r := newRace("replay-suzuka", runA, sidA)
 	clean, _, _ := replay(t, r)
 
 	srv, js := testServer(t)
 	dir := t.TempDir()
-	cfg := testConfig(srv.ClientURL(), dir)
-	crash := errors.New("killed before lap 2 was written")
-	cfg.beforeLapWrite = func(_, _ string, lap int32) error {
-		if lap == 2 {
-			return crash
-		}
-		return nil
-	}
-	first := start(t, cfg)
+	first := newLogs()
+	child := startChild(t, srv.ClientURL(), dir, 2, first)
+	first.await(t, 1, "consumers bound", nil)
 	publish(t, js, r.messages().msgs, false)
-	if err := first.wait(t); !errors.Is(err, crash) {
-		t.Fatalf("the first run returned %v, want the crash", err)
+	err := child.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("the first run ended with %v, want SIGKILL; log:\n%s", err, first.String())
 	}
-	if n := len(first.logs.find("lap written", nil)); n != 1 {
-		t.Fatalf("%d laps written before the crash, want 1", n)
+	if n := len(first.find("lap written", nil)); n != 1 {
+		t.Fatalf("%d laps written before the kill, want 1", n)
 	}
 
-	cfg.beforeLapWrite = nil
-	second := start(t, cfg)
+	second := start(t, testConfig(srv.ClientURL(), dir))
 	second.logs.await(t, 1, "store open", map[string]any{"sessions": 1})
 	second.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
 	if err := second.stop(t); err != nil {
 		t.Fatal(err)
 	}
 	if d := clean.diff(takeSnapshot(t, dir)); d != "" {
-		t.Errorf("the store after a crash differs from a clean run's:\n%s", d)
+		t.Errorf("the store after a kill differs from a clean run's:\n%s", d)
 	}
 	if got := second.logs.find("lap written", map[string]any{"lap": 1}); len(got) != 0 {
 		t.Errorf("lap 1 was written again after the restart")
@@ -405,7 +402,7 @@ func TestWhatItCannotUseIsDropped(t *testing.T) {
 	if len(snap.sessions) != 1 || len(snap.laps) != r.laps {
 		t.Errorf("sessions %q and %d laps, want the race's alone", snap.sessions, len(snap.laps))
 	}
-	for _, msg := range []string{"lap of a session that is not open; not written",
+	for _, msg := range []string{"lap of a session never started; dropped",
 		"end of a session never started; dropped", "event dropped"} {
 		if len(in.logs.find(msg, nil)) == 0 {
 			t.Errorf("no %q in the log:\n%s", msg, in.logs.String())
