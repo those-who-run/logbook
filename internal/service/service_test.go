@@ -330,7 +330,7 @@ func TestShutdownReturnsBothItsOwnAndServesErrors(t *testing.T) {
 }
 
 func TestShutdownWaitsForServeToReturn(t *testing.T) {
-	srv := newServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
+	srv := NewServer(http.NotFoundHandler(), NewLogger(io.Discard, slog.LevelInfo))
 	called := make(chan struct{})
 	srv.RegisterOnShutdown(func() { close(called) })
 	// Unbuffered, so Serve's error is sent only while shutdown is waiting for it.

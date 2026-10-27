@@ -127,7 +127,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (
 		return err
 	}
 	defer func() { err = errors.Join(err, st.Close()) }()
-	sessions, err := st.Sessions(ctx)
+	sessions, err := st.Sessions(context.WithoutCancel(ctx))
 	if err != nil {
 		return err
 	}
@@ -176,7 +176,9 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (
 	h.nc.Store(nc)
 
 	r := newConsumer(cfg, st, js, h, logger)
-	if err := r.restore(ctx); err != nil {
+	// A stop now lets the restore finish; the consumer's first round then stops,
+	// and Run returns nil (R8).
+	if err := r.restore(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
 	return r.run(ctx)
