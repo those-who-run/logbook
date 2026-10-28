@@ -51,7 +51,7 @@ jobs:
   checks:
     permissions:
       contents: read
-    uses: those-who-run/.github/.github/workflows/checks.yml@eb14066d3a559134c23de6a5dffdfdb46433f4cb # v0.2.12
+    uses: those-who-run/.github/.github/workflows/checks.yml@85d7d1f436817a6f52787b032f4ab9b3115eb4bd # v0.2.13
     with:
       go-version-file: go.mod
 
@@ -64,7 +64,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read # the weakened-tests check reads the PR's description
-    uses: those-who-run/.github/.github/workflows/go.yml@eb14066d3a559134c23de6a5dffdfdb46433f4cb # v0.2.12
+    uses: those-who-run/.github/.github/workflows/go.yml@85d7d1f436817a6f52787b032f4ab9b3115eb4bd # v0.2.13
     with:
       coverage-floor: 90
       cgo: true

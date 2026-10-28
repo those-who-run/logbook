@@ -17,7 +17,7 @@ jobs:
   image:
     permissions:
       contents: read
-    uses: those-who-run/.github/.github/workflows/image.yml@eb14066d3a559134c23de6a5dffdfdb46433f4cb # v0.2.12
+    uses: those-who-run/.github/.github/workflows/image.yml@85d7d1f436817a6f52787b032f4ab9b3115eb4bd # v0.2.13
     with:
       smoke: docker run --rm "$IMAGE" -version
   publish:
@@ -27,7 +27,7 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-    uses: those-who-run/.github/.github/workflows/image-publish.yml@eb14066d3a559134c23de6a5dffdfdb46433f4cb # v0.2.12
+    uses: those-who-run/.github/.github/workflows/image-publish.yml@85d7d1f436817a6f52787b032f4ab9b3115eb4bd # v0.2.13
     with:
       digest: ${{ needs.image.outputs.digest }}
       artifact: ${{ needs.image.outputs.artifact }}
