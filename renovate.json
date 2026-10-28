@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>those-who-run/.github#v0.2.13"],
+  "extends": ["github>those-who-run/.github#v0.2.14"],
   "packageRules": [
     {
       "description": "DuckDB's driver and its bindings: a new DuckDB can change index.duckdb's file format, and such an upgrade is a logbook release that migrates its own data (paddock ADR 0007). duckdb-go encodes DuckDB's version in its minor (v2.MAJOR_MINOR_PATCH.x: DuckDB 2.0.0 is v2.20000.0), so a DuckDB major arrives as a minor of the Go module, and the rule takes every update of it, majors included. They come in a PR of their own, labelled, and are never merged automatically; internal/store's TestOpensTheCommittedIndex fails on a file format the new DuckDB cannot read.",
