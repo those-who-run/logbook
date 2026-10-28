@@ -72,6 +72,19 @@ CREATE TABLE frames_pending (
     PRIMARY KEY (src, session_id, seq)
 );
 `,
+	// 3: the session fields contracts v0.1.4 added (paddock#276, paddock#289), as
+	// the events carry them. The started_ and ended_ columns are the event's word,
+	// kept apart from the v1-named columns logbook works out from the laps
+	// (fuel_at_start, fuel_used, final_position); type and ended_type are ecu's
+	// verdicts on the first frame and on all of them. Each is NULL in a row written
+	// before, and for an event from before v0.1.4.
+	`
+ALTER TABLE sessions ADD COLUMN started_fuel_at_start DOUBLE;
+ALTER TABLE sessions ADD COLUMN last_seq BIGINT;
+ALTER TABLE sessions ADD COLUMN ended_fuel_used DOUBLE;
+ALTER TABLE sessions ADD COLUMN ended_final_position INTEGER;
+ALTER TABLE sessions ADD COLUMN ended_type VARCHAR;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

@@ -44,14 +44,29 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **A session's summary.** Until a session ends, its complete laps and best
   lap are worked out from its lap rows. From `session.ended` on, the summary
   columns (`laps_completed`, `best_lap_ms`, `final_position`, `end_reason`,
-  `ended_at`) are the event's alone: ending it again, or a lap written after
-  the end, leaves them as they were.
+  `ended_at`, and the `ended_` columns below) are the event's alone: ending it
+  again, or a lap written after the end, leaves them as they were.
+- **Enums by name.** `type` and `ended_type` hold a `SessionType` and
+  `end_reason` an `EndReason` as v1 spelt them: the name without its prefix,
+  in lower case (`lap_race`, `solo_timed`; `restarted`,
+  `next_session_started`, `input_ended`).
+- **The events' own session fields** (contracts v0.1.4, paddock#276), kept
+  apart from the v1-named columns `logbook` works out from the laps:
+  `started_fuel_at_start` (the fuel on the session's first frame),
+  `last_seq` (the `seq` of its last frame), `ended_fuel_used` (the fuel the
+  session used, by ecu's count), `ended_final_position` (the position on its
+  last frame, absent outside a field; not `final_position`, which is v1's)
+  and `ended_type` (ecu's final verdict on the type; `type` is its verdict on
+  the first frame). Each is null in a row written before logbook took them,
+  and for an event from contracts v0.1.3, which carries none of them: a
+  `session.ended` with no `last_seq`, or a `session.started` with no start
+  fuel.
 - **`ended_at`** is the end event's own time, which the caller passes:
   `session.ended`'s `ce-time`, so a replay or a catch-up after a restart
   records when the session ended, not when `logbook` read it.
 - **`fuel_at_start`** is the first lap's starting fuel. For a session joined
-  part way it can differ from v1's, which was the fuel when the session began,
-  until `session.started` carries the start fuel (Prost).
+  part way it can differ from v1's, which was the fuel when the session began;
+  `started_fuel_at_start` is that fuel, from `session.started`.
 - **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
   `seq` range that are in race, and the finished frame that closes a race. Each
   file's key-value metadata records `frame_schema_version`.

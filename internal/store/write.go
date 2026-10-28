@@ -28,18 +28,21 @@ func (s *Store) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.index.ExecContext(ctx, `
-INSERT INTO sessions (src, id, started_at, type, car_code, total_laps, joined_part_way, first_seq)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sessions (src, id, started_at, type, car_code, total_laps, joined_part_way, first_seq,
+    started_fuel_at_start)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (src, id) DO UPDATE SET
     started_at = excluded.started_at,
     type = excluded.type,
     car_code = excluded.car_code,
     total_laps = excluded.total_laps,
     joined_part_way = excluded.joined_part_way,
-    first_seq = excluded.first_seq`,
+    first_seq = excluded.first_seq,
+    started_fuel_at_start = excluded.started_fuel_at_start`,
 		src, ev.GetSessionId(), ev.GetStartedAt().AsTime().UTC(),
 		enumName(ev.GetSessionType().String(), "SESSION_TYPE_"), ev.GetCarCode(),
-		optional(ev.TotalLaps), ev.GetJoinedPartWay(), int64(ev.GetFirstSeq()))
+		optional(ev.TotalLaps), ev.GetJoinedPartWay(), int64(ev.GetFirstSeq()),
+		fuelAtStart(ev))
 	if err != nil {
 		return fmt.Errorf("store: start session %s/%s: %w", src, ev.GetSessionId(), err)
 	}
@@ -85,12 +88,38 @@ func (s *Store) writeLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 	return len(racing), nil
 }
 
+// fuelAtStart is ev's fuel on the session's first frame, or NULL for an event from
+// before contracts v0.1.4, which has none. proto3 sends no zero, so a start with an
+// empty tank is NULL too.
+func fuelAtStart(ev *eventsv1.SessionStarted) driver.Value {
+	if ev.GetFuelAtStart() == 0 {
+		return nil
+	}
+	return ev.GetFuelAtStart()
+}
+
+// endedFields are the columns of ev's own summary fields that contracts v0.1.4
+// added: last_seq, ended_fuel_used, ended_final_position and ended_type, all NULL
+// for an event from before v0.1.4. Such an event has no last_seq, and a later one
+// always has: seq counts from 1.
+func endedFields(ev *eventsv1.SessionEnded) [4]driver.Value {
+	if ev.GetLastSeq() == 0 {
+		return [4]driver.Value{}
+	}
+	summary := ev.GetSummary()
+	return [4]driver.Value{
+		int64(ev.GetLastSeq()), summary.GetFuelUsed(), optional(summary.FinalPosition),
+		enumName(summary.GetSessionType().String(), "SESSION_TYPE_"),
+	}
+}
+
 // EndSession records how ev's session ended, at endedAt: the time the event was
 // published (its ce-time), which the caller passes because SessionEnded carries no
 // time of its own, and which is right for a replay or a catch-up where the store's
 // clock is not. The summary columns (laps_completed, best_lap_ms, final_position,
-// end_reason, ended_at) come from the first end and only from it: ending the
-// session again, or writing one of its laps after the end, leaves them alone.
+// end_reason, ended_at, and endedFields') come from the first end and only from it:
+// ending the session again, or writing one of its laps after the end, leaves them
+// alone.
 func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) (err error) {
 	src = sourceOf(src)
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
@@ -105,6 +134,7 @@ func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.Session
 		return err
 	}
 	summary := ev.GetSummary()
+	ended := endedFields(ev)
 	tx, err := s.index.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -123,11 +153,16 @@ UPDATE sessions SET
     laps_completed = ?,
     best_lap_ms = ?,
     final_position = COALESCE(?, (SELECT position FROM laps
-        WHERE src = ? AND session_id = ? AND position IS NOT NULL ORDER BY lap DESC LIMIT 1))
+        WHERE src = ? AND session_id = ? AND position IS NOT NULL ORDER BY lap DESC LIMIT 1)),
+    last_seq = ?,
+    ended_fuel_used = ?,
+    ended_final_position = ?,
+    ended_type = ?
 WHERE src = ? AND id = ? AND ended_at IS NULL`,
 		endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
 		summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
 		optional(summary.FinishingPosition), src, ev.GetSessionId(),
+		ended[0], ended[1], ended[2], ended[3],
 		src, ev.GetSessionId())
 	if err != nil {
 		return fmt.Errorf("store: end session %s/%s: %w", src, ev.GetSessionId(), err)
