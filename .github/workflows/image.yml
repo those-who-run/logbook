@@ -5,14 +5,20 @@ name: Image
 # `main` as `image / build`; renaming the job leaves `main` waiting for a check that
 # never reports. A repository without an image deletes this file with the
 # Dockerfile, .dockerignore and release.yml (README.md, "Without an image").
+#
+# It runs in the merge queue too (merge_group), as ci.yml does, and still pushes
+# nothing there: this job may only read, and publishing is release.yml's.
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
 # Nothing by default; the job asks for what it uses.
 permissions: {}
 
+# As in ci.yml: only a superseded PR run is cancelled.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

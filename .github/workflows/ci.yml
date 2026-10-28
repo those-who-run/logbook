@@ -6,15 +6,23 @@ name: CI
 # there. A repository with an image also requires `image / build`, from image.yml in
 # this directory. Renaming any of them leaves `main` waiting for a check that never
 # reports.
+#
+# merge_group runs them again on what a merge queue would land, the PR merged onto
+# `main` and the PRs ahead of it; a queue whose required checks never report there
+# never merges. The release and Scorecard workflows don't run on it.
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
   push:
     branches: [main]
 
 # Nothing by default; each job asks for what it uses.
 permissions: {}
 
-# A new push to a PR cancels its superseded run; runs on main always finish.
+# A new push to a PR cancels its superseded run; runs on main and in the merge
+# queue always finish (a queue run has a ref of its own, and the queue would read a
+# cancelled run as a failure).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
