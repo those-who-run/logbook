@@ -44,23 +44,30 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **A session's summary.** Until a session ends, its complete laps and best
   lap are worked out from its lap rows. From `session.ended` on, the summary
   columns (`laps_completed`, `best_lap_ms`, `final_position`, `end_reason`,
-  `ended_at`, and the `ended_` columns below) are the event's alone: ending it
-  again, or a lap written after the end, leaves them as they were.
-- **Enums by name.** `type` and `ended_type` hold a `SessionType` and
+  `ended_at`, and the end event's own columns below) are the event's alone:
+  ending it again, or a lap written after the end, leaves them as they were.
+- **Enums by name.** `type` and `session_kind` hold a `SessionType` and
   `end_reason` an `EndReason` as v1 spelt them: the name without its prefix,
   in lower case (`lap_race`, `solo_timed`; `restarted`,
   `next_session_started`, `input_ended`).
 - **The events' own session fields** (contracts v0.1.4, paddock#276), kept
-  apart from the v1-named columns `logbook` works out from the laps:
+  apart from the columns `logbook` works out from the laps:
   `started_fuel_at_start` (the fuel on the session's first frame),
   `last_seq` (the `seq` of its last frame), `ended_fuel_used` (the fuel the
   session used, by ecu's count), `ended_final_position` (the position on its
-  last frame, absent outside a field; not `final_position`, which is v1's)
-  and `ended_type` (ecu's final verdict on the type; `type` is its verdict on
-  the first frame). Each is null in a row written before logbook took them,
-  and for an event from contracts v0.1.3, which carries none of them: a
-  `session.ended` with no `last_seq`, or a `session.started` with no start
-  fuel.
+  last frame, absent outside a field) and `session_kind` (ecu's final verdict
+  on the type, under v1's name for it; `type` is its verdict on the first
+  frame). Each is null in a row written before logbook took them, and for an
+  event from contracts v0.1.3, which carries none of them: a `session.ended`
+  with no `last_seq`, or a `session.started` with no start fuel. A start fuel
+  of 0 is stored as 0 when the session's type is one contracts v0.1.4 added
+  (`lap_race` to `solo_timed`), and as null otherwise.
+- **`final_position` is not v1's.** v1's `final_position` was the position on
+  the session's last frame, which is what `ended_final_position` holds, but
+  for a solo session, where v1 stored GT7's 1 and ecu leaves it out.
+  `logbook`'s `final_position` is the finishing position when there is one,
+  else the last lap's position. A known difference for the parity harness
+  (paddock#40), which compares against v1's rows.
 - **`ended_at`** is the end event's own time, which the caller passes:
   `session.ended`'s `ce-time`, so a replay or a catch-up after a restart
   records when the session ended, not when `logbook` read it.

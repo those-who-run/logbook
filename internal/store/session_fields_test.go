@@ -19,7 +19,7 @@ import (
 const fixtureV013 = "testdata/index-v0.1.3.duckdb"
 
 // newColumns are the sessions columns migration 3 adds (paddock#289).
-const newColumns = `started_fuel_at_start, last_seq, ended_fuel_used, ended_final_position, ended_type`
+const newColumns = `started_fuel_at_start, last_seq, ended_fuel_used, ended_final_position, session_kind`
 
 // withV014Fields gives sess every session field contracts v0.1.4 added.
 func withV014Fields(sess session) session {
@@ -61,7 +61,7 @@ func TestStoresEverySessionFieldContractsV014Added(t *testing.T) {
 // AC3 and R3: a session ended by a restart, by the next session and when a
 // replay's frames stopped each stores its own end_reason, by name as the older
 // reasons are; and the session types contracts v0.1.4 added are stored by name in
-// type and ended_type.
+// type and session_kind.
 func TestTheNewEndReasonsAndSessionTypesAreStoredByName(t *testing.T) {
 	s := open(t, t.TempDir())
 	cases := []struct {
@@ -84,9 +84,40 @@ func TestTheNewEndReasonsAndSessionTypesAreStoredByName(t *testing.T) {
 		sess.write(t, s)
 		want = append(want, []string{id, c.typeStored, c.reasonStored, c.typeStored})
 	}
-	got := rowsOf(t, t.Context(), s.index, `SELECT id, type, end_reason, ended_type FROM sessions ORDER BY id`)
+	got := rowsOf(t, t.Context(), s.index, `SELECT id, type, end_reason, session_kind FROM sessions ORDER BY id`)
 	if !slices.EqualFunc(got, want, slices.Equal) {
-		t.Errorf("id, type, end_reason, ended_type %q, want %q", got, want)
+		t.Errorf("id, type, end_reason, session_kind %q, want %q", got, want)
+	}
+}
+
+// A start fuel of 0 is a real empty tank when the session's type is one contracts
+// v0.1.4 added, and so the event is from v0.1.4 on; with an older type it is an
+// event that carries no start fuel, and NULL.
+func TestAStartFuelOf0IsKeptOnlyFromAV014Event(t *testing.T) {
+	s := open(t, t.TempDir())
+	cases := []struct {
+		typ  eventsv1.SessionType
+		want string
+	}{
+		{eventsv1.SessionType_SESSION_TYPE_LAP_RACE, "0"},
+		{eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, "0"},
+		{eventsv1.SessionType_SESSION_TYPE_RACE, "NULL"},
+		{eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED, "NULL"},
+	}
+	var want [][]string
+	for i, c := range cases {
+		id := fmt.Sprintf("%s%d", sid[:25], i)
+		started := race("live", id).started
+		started.SessionType = c.typ
+		started.FuelAtStart = 0
+		if err := s.StartSession(t.Context(), started); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, []string{id, c.want})
+	}
+	got := rowsOf(t, t.Context(), s.index, `SELECT id, started_fuel_at_start FROM sessions ORDER BY id`)
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("id, started_fuel_at_start %q, want %q", got, want)
 	}
 }
 

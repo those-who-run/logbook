@@ -89,17 +89,24 @@ func (s *Store) writeLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 }
 
 // fuelAtStart is ev's fuel on the session's first frame, or NULL for an event from
-// before contracts v0.1.4, which has none. proto3 sends no zero, so a start with an
-// empty tank is NULL too.
+// before contracts v0.1.4, which has none. proto3 sends no zero, so a 0 is told
+// apart by the session type: the types ecu sends from v0.1.4 on (LAP_RACE to
+// SOLO_TIMED) are new in v0.1.4, so with one of them a 0 is a real empty tank, and
+// with any other it is an event that carries no start fuel.
 func fuelAtStart(ev *eventsv1.SessionStarted) driver.Value {
-	if ev.GetFuelAtStart() == 0 {
+	if ev.GetFuelAtStart() == 0 && !fromV014(ev.GetSessionType()) {
 		return nil
 	}
 	return ev.GetFuelAtStart()
 }
 
+// fromV014 says whether t is one of the session types contracts v0.1.4 added.
+func fromV014(t eventsv1.SessionType) bool {
+	return t >= eventsv1.SessionType_SESSION_TYPE_LAP_RACE && t <= eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED
+}
+
 // endedFields are the columns of ev's own summary fields that contracts v0.1.4
-// added: last_seq, ended_fuel_used, ended_final_position and ended_type, all NULL
+// added: last_seq, ended_fuel_used, ended_final_position and session_kind, all NULL
 // for an event from before v0.1.4. Such an event has no last_seq, and a later one
 // always has: seq counts from 1.
 func endedFields(ev *eventsv1.SessionEnded) [4]driver.Value {
@@ -157,7 +164,7 @@ UPDATE sessions SET
     last_seq = ?,
     ended_fuel_used = ?,
     ended_final_position = ?,
-    ended_type = ?
+    session_kind = ?
 WHERE src = ? AND id = ? AND ended_at IS NULL`,
 		endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
 		summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
