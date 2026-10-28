@@ -49,7 +49,9 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **Enums by name.** `type` and `session_kind` hold a `SessionType` and
   `end_reason` an `EndReason` as v1 spelt them: the name without its prefix,
   in lower case (`lap_race`, `solo_timed`; `restarted`,
-  `next_session_started`, `input_ended`).
+  `next_session_started`, `input_ended`). A value from a newer contract than
+  logbook's is stored as its bare number (`"9"`), in `type`, `end_reason` and
+  `session_kind` alike.
 - **The events' own session fields** (contracts v0.1.4, paddock#276), kept
   apart from the columns `logbook` works out from the laps:
   `started_fuel_at_start` (the fuel on the session's first frame),
@@ -61,7 +63,10 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   event from contracts v0.1.3, which carries none of them: a `session.ended`
   with no `last_seq`, or a `session.started` with no start fuel. A start fuel
   of 0 is stored as 0 when the session's type is one contracts v0.1.4 added
-  (`lap_race` to `solo_timed`), and as null otherwise.
+  (`lap_race` to `solo_timed`), and as null otherwise. So a real 0 L from a
+  v0.1.4 or later start sent as `unknown`, or with a type added after
+  `solo_timed`, is stored as null; the lasting fix is to make the field
+  `optional` in contracts.
 - **`final_position` is not v1's.** v1's `final_position` was the position on
   the session's last frame, which is what `ended_final_position` holds, but
   for a solo session, where v1 stored GT7's 1 and ecu leaves it out.
