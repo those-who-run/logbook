@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -22,10 +21,13 @@ import (
 	"github.com/those-who-run/contracts/ce"
 )
 
-// The replay of a v1 recording as ecu v0.1.4 published it, captured from NATS by
-// testdata/replays/capture.go, which says where it came from and how to make it
-// again; internal/store's TestTheReplayFixtureIsTheCapture pins it.
-const suzukaPitStop = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
+// Replays of two v1 recordings as ecu v0.1.4 published them, captured from NATS by
+// testdata/replays/capture.go, which says where they came from and how to make
+// them again; internal/store's TestTheReplayFixturesAreTheCaptures pins them.
+const (
+	suzukaPitStop = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
+	suzukaNoStop  = "../../testdata/replays/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz"
+)
 
 // captured is one message of a replay fixture, as ecu published it.
 type captured struct {
@@ -79,28 +81,6 @@ func readRecording(t *testing.T, path string) recording {
 	return r
 }
 
-// as is the same replay under another source, session and run, with car code
-// car in place of the recording's: a second `ecu replay` of the recording, told
-// apart by its frames.
-func (r recording) as(t *testing.T, src, sid, run string, car int) recording {
-	t.Helper()
-	out := recording{src: src, sid: sid, run: run}
-	repl := strings.NewReplacer("twr.v1."+r.src+".", "twr.v1."+src+".", `"`+r.src+`"`, `"`+src+`"`,
-		r.src+":", src+":", r.sid, sid, r.run, run, `"carCode":683`, `"carCode":`+strconv.Itoa(car))
-	for _, m := range r.msgs {
-		b, err := json.Marshal(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var c captured
-		if err := json.Unmarshal([]byte(repl.Replace(string(b))), &c); err != nil {
-			t.Fatal(err)
-		}
-		out.msgs = append(out.msgs, c)
-	}
-	return out
-}
-
 // publishRaw sends msgs to JetStream as they were captured, headers and payload
 // unchanged, and waits for the server to store them all.
 func publishRaw(t *testing.T, js jetstream.JetStream, msgs []captured) {
@@ -131,9 +111,43 @@ var v1Laps = [][]string{
 	{"6", "60310", "19.382", "1", "122"},
 }
 
+// v1's laps of real-nuc-suzuka-no-stop-2026-10-15, from the same golden, with no
+// frame of difference.
+var v1NoStopLaps = [][]string{
+	{"1", "60358", "13.592", "10", "151"},
+	{"2", "64611", "16.263", "7", "139"},
+	{"3", "63139", "17.33", "4", "135"},
+	{"4", "61186", "17.332", "2", "125"},
+	{"5", "63366", "17.24", "2", "127"},
+	{"6", "63981", "15.661", "2", "129"},
+}
+
+// checkLaps compares a session's lap rows with v1's (lap, lap time, fuel used,
+// position, frames), and checks each lap's file holds exactly the frames its row
+// counts, all in the row's seq range.
+func checkLaps(t *testing.T, dir string, laps, v1 [][]string) {
+	t.Helper()
+	if len(laps) != len(v1) {
+		t.Errorf("%d laps, want v1's %d: %q", len(laps), len(v1), laps)
+		return
+	}
+	for i, lap := range laps {
+		if got := []string{lap[2], lap[3], lap[7], lap[8], lap[11]}; !slices.Equal(got, v1[i]) {
+			t.Errorf("%s lap %d: %q, want v1's %q", lap[0], i+1, got, v1[i])
+		}
+		n := query(t, fmt.Sprintf(`SELECT count(*), count(DISTINCT seq) FROM '%s' WHERE seq BETWEEN %s AND %s`,
+			filepath.Join(dir, lap[16]), lap[9], lap[10]))
+		all := query(t, fmt.Sprintf(`SELECT count(*) FROM '%s'`, filepath.Join(dir, lap[16])))
+		if want := []string{lap[11], lap[11]}; !slices.Equal(n[0], want) || all[0][0] != lap[11] {
+			t.Errorf("%s lap %d: the file holds %q frames (%q in its range, distinct), the row says %s",
+				lap[0], i+1, all[0], n[0], lap[11])
+		}
+	}
+}
+
 // replayRecording runs logbook against a server while r is published, until its
 // session has ended and every message is acked, and returns the snapshot.
-func replayRecording(t *testing.T, r recording) (snapshot, *instance) {
+func replayRecording(t *testing.T, r recording) (snapshot, *instance, string) {
 	t.Helper()
 	srv, js := testServer(t)
 	dir := t.TempDir()
@@ -144,7 +158,7 @@ func replayRecording(t *testing.T, r recording) (snapshot, *instance) {
 	if err := in.stop(t); err != nil {
 		t.Fatal(err)
 	}
-	return takeSnapshot(t, dir), in
+	return takeSnapshot(t, dir), in, dir
 }
 
 // AC1: `ecu replay --speed max` of the Suzuka pit-stop recording leaves one
@@ -153,7 +167,7 @@ func replayRecording(t *testing.T, r recording) (snapshot, *instance) {
 // staged.
 func TestTheSuzukaReplayLeavesItsSessionAndLaps(t *testing.T) {
 	r := readRecording(t, suzukaPitStop)
-	snap, in := replayRecording(t, r)
+	snap, in, dir := replayRecording(t, r)
 
 	if len(snap.sessions) != 1 {
 		t.Fatalf("sessions %q, want one", snap.sessions)
@@ -175,14 +189,8 @@ func TestTheSuzukaReplayLeavesItsSessionAndLaps(t *testing.T) {
 		t.Errorf("the session runs from %v to %v", startedAt, endedAt)
 	}
 
-	if len(snap.laps) != len(v1Laps) {
-		t.Fatalf("%d laps, want v1's %d: %q", len(snap.laps), len(v1Laps), snap.laps)
-	}
+	checkLaps(t, dir, snap.laps, v1Laps)
 	for i, lap := range snap.laps {
-		// lap, lap time, fuel used, position, frames.
-		if got := []string{lap[2], lap[3], lap[7], lap[8], lap[11]}; !slices.Equal(got, v1Laps[i]) {
-			t.Errorf("lap %d: %q, want v1's %q", i+1, got, v1Laps[i])
-		}
 		file := fmt.Sprintf("sessions/%s/%s/lap-%03d.parquet", r.src, r.sid, i+1)
 		if lap[16] != file || snap.files[file] == "" {
 			t.Errorf("lap %d: file %q, want %s in place", i+1, lap[16], file)
@@ -209,7 +217,7 @@ func TestTheSuzukaReplayLeavesItsSessionAndLaps(t *testing.T) {
 // the same store as a replay with no kill.
 func TestAKillMidReplayGivesTheSameStore(t *testing.T) {
 	r := readRecording(t, suzukaPitStop)
-	clean, _ := replayRecording(t, r)
+	clean, _, _ := replayRecording(t, r)
 
 	srv, js := testServer(t)
 	dir := t.TempDir()
@@ -240,49 +248,67 @@ func TestAKillMidReplayGivesTheSameStore(t *testing.T) {
 	}
 }
 
-// AC3: two replays of the recording at once, under different sources, give two
-// sessions, each as a replay of its own gives, its lap files holding only its own
-// frames, though both number their frames alike.
+// AC3: two replays of different recordings at once, under different sources,
+// give two sessions, each as a replay of it alone gives and with v1's laps,
+// though both number their frames alike. Each runs ahead of the other in turn:
+// in lockstep, two replays of one track keep their seqs close, and a session
+// that took the other's progress for its own would not show (R5). With
+// consume.go's frame loop raising high for every open session, not only the
+// frame's own, each order fails.
 func TestTwoReplaysAtOnceNeverMix(t *testing.T) {
-	a := readRecording(t, suzukaPitStop)
-	b := a.as(t, "replay-other", sidB, runB, 1234)
-	alone, _ := replayRecording(t, b)
+	pit, noStop := readRecording(t, suzukaPitStop), readRecording(t, suzukaNoStop)
+	alonePit, _, _ := replayRecording(t, pit)
+	aloneNoStop, _, _ := replayRecording(t, noStop)
 
-	srv, js := testServer(t)
-	dir := t.TempDir()
-	in := start(t, testConfig(srv.ClientURL(), dir))
-	// Interleaved, as two replays publishing at once would be.
-	var both []captured
-	for i := range max(len(a.msgs), len(b.msgs)) {
-		if i < len(a.msgs) {
-			both = append(both, a.msgs[i])
+	for _, c := range []struct {
+		name          string
+		ahead, behind recording
+	}{
+		{"the pit stop ahead", pit, noStop},
+		{"the no stop ahead", noStop, pit},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, js := testServer(t)
+			dir := t.TempDir()
+			in := start(t, testConfig(srv.ClientURL(), dir))
+			publishRaw(t, js, interleave(c.ahead.msgs, c.behind.msgs, 150))
+			in.logs.await(t, 1, "session ended", map[string]any{"session": pit.sid})
+			in.logs.await(t, 1, "session ended", map[string]any{"session": noStop.sid})
+			waitStreamRead(t, js, srv)
+			if err := in.stop(t); err != nil {
+				t.Fatal(err)
+			}
+			snap := takeSnapshot(t, dir)
+			if len(snap.sessions) != 2 {
+				t.Fatalf("sessions %q, want two", snap.sessions)
+			}
+			for _, s := range []struct {
+				r     recording
+				alone snapshot
+				v1    [][]string
+			}{{pit, alonePit, v1Laps}, {noStop, aloneNoStop, v1NoStopLaps}} {
+				got := snap.only(s.r.sid)
+				checkLaps(t, dir, got.laps, s.v1)
+				if d := s.alone.diff(got); d != "" {
+					t.Errorf("%s differs from a replay of it alone:\n%s", s.r.src, d)
+				}
+			}
+		})
+	}
+}
+
+// interleave is two replays publishing at once, the second starting lag messages
+// after the first.
+func interleave(first, second []captured, lag int) []captured {
+	out := slices.Clone(first[:min(lag, len(first))])
+	first = first[len(out):]
+	for i := range max(len(first), len(second)) {
+		if i < len(first) {
+			out = append(out, first[i])
 		}
-		if i < len(b.msgs) {
-			both = append(both, b.msgs[i])
+		if i < len(second) {
+			out = append(out, second[i])
 		}
 	}
-	publishRaw(t, js, both)
-	in.logs.await(t, 1, "session ended", map[string]any{"session": a.sid})
-	in.logs.await(t, 1, "session ended", map[string]any{"session": b.sid})
-	waitStreamRead(t, js, srv)
-	if err := in.stop(t); err != nil {
-		t.Fatal(err)
-	}
-	snap := takeSnapshot(t, dir)
-	if len(snap.sessions) != 2 || len(snap.laps) != 2*len(v1Laps) {
-		t.Fatalf("sessions %q with %d laps, want two of %d", snap.sessions, len(snap.laps), len(v1Laps))
-	}
-	if d := alone.diff(snap.only(b.sid)); d != "" {
-		t.Errorf("replay-other differs from a replay of it alone:\n%s", d)
-	}
-	for _, lap := range snap.laps {
-		car := "683"
-		if lap[0] == b.src {
-			car = "1234"
-		}
-		got := query(t, fmt.Sprintf(`SELECT DISTINCT car_code FROM '%s'`, filepath.Join(dir, lap[16])))
-		if len(got) != 1 || got[0][0] != car {
-			t.Errorf("%s lap %s holds frames of cars %q, want only %s", lap[0], lap[2], got, car)
-		}
-	}
+	return out
 }

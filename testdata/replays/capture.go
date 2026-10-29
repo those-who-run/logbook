@@ -10,23 +10,28 @@
 // with JetStream and the streams in internal/runner/testdata/streams (paddock's),
 // subscribes to every subject logbook reads, and runs
 //
-//	ecu replay --nats URL --src replay-suzuka --speed max RECORDING
+//	ecu replay --nats URL --src SRC --speed max RECORDING
 //
 // with no --clock, so the replay dates its first frame 2026-01-01T00:00:00Z. The
 // session and run ids are ULIDs ecu mints, so they change on every capture. It
 // fails unless the recording has the sha256 given and the subscription saw every
-// message the streams stored. From the repository's root:
+// message the streams stored. From the repository's root, the two fixtures here:
 //
-//	go run testdata/replays/capture.go \
+//	go run testdata/replays/capture.go -src replay-suzuka \
 //	    -recording PADDOCK/recordings/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz \
 //	    -sha256 9684c2ee9e1da825b0870b22bfec81ecff833a3ae20e523c0efc61e8863e5bdb \
 //	    > testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz
+//	go run testdata/replays/capture.go -src replay-suzuka-no-stop \
+//	    -recording PADDOCK/recordings/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz \
+//	    -sha256 0477116644a19ab97aac4c19dbecaa4129ee691c57378562cf36c7a094c4aeaa \
+//	    > testdata/replays/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz
 //
 // The recording is paddock's copy of v1's fixture, in a paddock clone's
 // recordings/, its sha256 from SOURCES.yaml there.
 // nats-server is the one the runner tests download (TWR_TEST_NATS_SERVER, or the
-// user's cache), or -nats-server. After a capture, update the sums and the ecu
-// version in internal/runner/replay_test.go and internal/store/replay_test.go.
+// user's cache), or -nats-server. After a capture, update the fixture's sha256,
+// and the ecu version and recording sum beside it, in replayFixtures in
+// internal/store/replay_test.go, which TestTheReplayFixturesAreTheCaptures checks.
 package main
 
 import (
@@ -55,7 +60,6 @@ import (
 const (
 	ecuModule  = "github.com/those-who-run/ecu/cmd/ecu"
 	ecuVersion = "v0.1.4"
-	src        = "replay-suzuka"
 )
 
 type line struct {
@@ -67,9 +71,10 @@ type line struct {
 func main() {
 	recording := flag.String("recording", "", "the v1 recording to replay")
 	sum := flag.String("sha256", "", "the recording's sha256, from paddock's recordings/SOURCES.yaml")
+	src := flag.String("src", "replay-suzuka", "the source the replay publishes under")
 	natsServer := flag.String("nats-server", defaultNATSServer(), "nats-server v2.15.1")
 	flag.Parse()
-	if err := capture(*recording, *sum, *natsServer); err != nil {
+	if err := capture(*recording, *sum, *src, *natsServer); err != nil {
 		fmt.Fprintln(os.Stderr, "capture:", err)
 		os.Exit(1)
 	}
@@ -83,7 +88,7 @@ func defaultNATSServer() string {
 	return filepath.Join(cache, "those-who-run", "nats-server-v2.15.1-"+runtime.GOOS+"-"+runtime.GOARCH, "nats-server")
 }
 
-func capture(recording, want, natsServer string) error {
+func capture(recording, want, src, natsServer string) error {
 	b, err := os.ReadFile(recording)
 	if err != nil {
 		return err

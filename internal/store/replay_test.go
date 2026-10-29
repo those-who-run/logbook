@@ -19,17 +19,26 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// The replay fixture is what ecu v0.1.4's `ecu replay --speed max` published for
-// v1's recording real-nuc-suzuka-pit-stop-2026-10-15 (paddock's
-// recordings/SOURCES.yaml has its sha256), captured from NATS by
-// testdata/replays/capture.go, which says how to make it again. A new capture
-// changes these together.
-const (
-	replayFixture       = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
-	replayFixtureSHA256 = "ec15a8e3346b5008b1058ec659ecc8803c674954a5b9011cee1150d2704f3f2d"
-	replayECU           = "v0.1.4"
-	replayRecording     = "9684c2ee9e1da825b0870b22bfec81ecff833a3ae20e523c0efc61e8863e5bdb"
-)
+// The replay fixtures are what ecu's `ecu replay --speed max` published for two
+// of v1's recordings (paddock's recordings/SOURCES.yaml has their sha256s),
+// captured from NATS by testdata/replays/capture.go, which says how to make them
+// again. A new capture changes its row here.
+var replayFixtures = []struct {
+	file, sha256, ecu, recording string
+}{
+	{
+		"real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz",
+		"ec15a8e3346b5008b1058ec659ecc8803c674954a5b9011cee1150d2704f3f2d",
+		"v0.1.4", "9684c2ee9e1da825b0870b22bfec81ecff833a3ae20e523c0efc61e8863e5bdb",
+	},
+	{
+		"real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz",
+		"295341b0978e4d8f347038bce1763334a2424ae6d45f3450c39ace75bac1c5bc",
+		"v0.1.4", "0477116644a19ab97aac4c19dbecaa4129ee691c57378562cf36c7a094c4aeaa",
+	},
+}
+
+const replayFixture = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
 
 // v1Lap is a lap as v1 1.0.0 stored it for the recording: ecu's golden
 // (internal/race/testdata/golden/real-nuc-suzuka-pit-stop-2026-10-15.jsonl at
@@ -128,15 +137,26 @@ func readReplay(t *testing.T) recorded {
 	return r
 }
 
-// The fixture is the capture its provenance names, byte for byte.
-func TestTheReplayFixtureIsTheCapture(t *testing.T) {
-	b, err := os.ReadFile(replayFixture)
+// Each fixture is the capture its provenance names, byte for byte, and there is
+// no other.
+func TestTheReplayFixturesAreTheCaptures(t *testing.T) {
+	dir := filepath.Join("..", "..", "testdata", "replays")
+	found, err := filepath.Glob(filepath.Join(dir, "*.jsonl.gz"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != replayFixtureSHA256 {
-		t.Errorf("%s has sha256 %x, want %s: capture it again with testdata/replays/capture.go "+
-			"(ecu %s, recording sha256 %s), never by hand", replayFixture, sum, replayFixtureSHA256, replayECU, replayRecording)
+	if len(found) != len(replayFixtures) {
+		t.Errorf("%d fixtures in %s, want %d: %q", len(found), dir, len(replayFixtures), found)
+	}
+	for _, f := range replayFixtures {
+		b, err := os.ReadFile(filepath.Join(dir, f.file)) //nolint:gosec // a fixed test file
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sum := sha256.Sum256(b); hex.EncodeToString(sum[:]) != f.sha256 {
+			t.Errorf("%s has sha256 %x, want %s: capture it again with testdata/replays/capture.go "+
+				"(ecu %s, recording sha256 %s), never by hand", f.file, sum, f.sha256, f.ecu, f.recording)
+		}
 	}
 }
 
