@@ -199,6 +199,15 @@ create `TELEMETRY` and `EVENTS` from `internal/runner/testdata/streams`, exact
 copies of paddock's `deploy/nats/streams` at the commit the tests name, which
 a test checks by their sums.
 
+The store and the runner are also tested on a real recording: what ecu
+v0.1.4's `ecu replay --speed max` published for v1's
+`real-nuc-suzuka-pit-stop-2026-10-15`, captured once from NATS into
+[`testdata/replays/`](testdata/replays) as gzipped JSON lines (subject,
+headers, payload). The tests publish it as it was captured, so they need
+neither ecu nor the recording, and compare the laps with v1's.
+[`capture.go`](testdata/replays/capture.go) there says where it came from and
+captures it again; a test pins its sum.
+
 ## Conventions
 
 The ones every Go component shares, from the
