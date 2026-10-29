@@ -2,6 +2,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -27,18 +28,18 @@ var replayFixtures = []struct {
 	file, sha256, ecu, recording string
 }{
 	{
-		"real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz",
+		"suzuka-pit-stop-2026-10-15.jsonl.gz",
 		"ec15a8e3346b5008b1058ec659ecc8803c674954a5b9011cee1150d2704f3f2d",
 		"v0.1.4", "9684c2ee9e1da825b0870b22bfec81ecff833a3ae20e523c0efc61e8863e5bdb",
 	},
 	{
-		"real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz",
+		"suzuka-no-stop-2026-10-15.jsonl.gz",
 		"295341b0978e4d8f347038bce1763334a2424ae6d45f3450c39ace75bac1c5bc",
 		"v0.1.4", "0477116644a19ab97aac4c19dbecaa4129ee691c57378562cf36c7a094c4aeaa",
 	},
 }
 
-const replayFixture = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
+const replayFixture = "../../testdata/replays/suzuka-pit-stop-2026-10-15.jsonl.gz"
 
 // v1Lap is a lap as v1 1.0.0 stored it for the recording: ecu's golden
 // (internal/race/testdata/golden/real-nuc-suzuka-pit-stop-2026-10-15.jsonl at
@@ -56,8 +57,9 @@ type v1Lap struct {
 // But for one frame: lap 3 holds 167 here and 166 in v1. v1 also left out seq
 // 322, the first in-race frame after the pause in lap 3, which it read as a
 // frozen pause (the car still for a second or more); v2 keeps every in-race frame
-// of the lap (R5), and ecu's race tests leave the frozen pause out of scope
-// (TestSessionsAndLapsEqualV1s and frozen, ecu v0.1.4).
+// of the lap, with the phase ecu publishes (R5). ecu doesn't read the frozen pause
+// yet (paddock#77; TestSessionsAndLapsEqualV1s and frozen at ecu v0.1.4): once
+// it does, a capture from that ecu gives 166 here, and the + 1 goes.
 var v1SuzukaPitStop = []v1Lap{
 	{1, 57109, 96.72370910644531, 65.59944915771484, 31.124, 1, 118},
 	{2, 60538, 65.59944915771484, 37.908443450927734, 27.691, 1, 121},
@@ -224,6 +226,32 @@ fuel_at_start, fuel_used, final_position, end_reason FROM sessions`)
 	wantSession := [][]string{{r.src, sid, "lap_race", "683", "6", "6", "96.72370910644531", "53.291", "1", "finished"}}
 	if !slices.EqualFunc(session, wantSession, slices.Equal) {
 		t.Errorf("sessions\n got %q\nwant %q", session, wantSession)
+	}
+
+	// AC6 on the same store: the export prints the six laps, in lap order, as the
+	// rows hold them.
+	var out bytes.Buffer
+	if err := s.ExportLaps(t.Context(), &out, r.src); err != nil {
+		t.Fatal(err)
+	}
+	var exported []Lap
+	lines := bufio.NewScanner(&out)
+	for lines.Scan() {
+		var l Lap
+		if err := json.Unmarshal(lines.Bytes(), &l); err != nil {
+			t.Fatalf("%q: %v", lines.Text(), err)
+		}
+		exported = append(exported, l)
+	}
+	if len(exported) != len(v1SuzukaPitStop) {
+		t.Fatalf("exported %d laps, want %d", len(exported), len(v1SuzukaPitStop))
+	}
+	for i, l := range exported {
+		v1 := v1SuzukaPitStop[i]
+		got := v1Lap{l.Lap, deref(l.LapTimeMs), l.FuelStart, l.FuelEnd, l.FuelUsed, deref(l.Position), l.Frames}
+		if l.SessionID != sid || got != v1 {
+			t.Errorf("export line %d: session %s, %+v; want %s, v1's %+v", i+1, l.SessionID, got, sid, v1)
+		}
 	}
 }
 

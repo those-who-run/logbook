@@ -202,8 +202,9 @@ a test checks by their sums.
 The store and the runner are also tested on real recordings: what ecu
 v0.1.4's `ecu replay --speed max` published for v1's
 `real-nuc-suzuka-pit-stop-2026-10-15` and `real-nuc-suzuka-no-stop-2026-10-15`,
-captured once from NATS into [`testdata/replays/`](testdata/replays) as
-gzipped JSON lines (subject, headers, payload). The tests publish them as they
+captured once from NATS into [`testdata/replays/`](testdata/replays)
+(`suzuka-pit-stop-2026-10-15.jsonl.gz` and `suzuka-no-stop-2026-10-15.jsonl.gz`)
+as gzipped JSON lines (subject, headers, payload). The tests publish them as they
 were captured, so they need neither ecu nor the recordings, and compare the
 laps with v1's. [`capture.go`](testdata/replays/capture.go) there says where
 they came from and captures them again; a test pins their sums.

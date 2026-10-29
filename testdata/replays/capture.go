@@ -12,22 +12,29 @@
 //
 //	ecu replay --nats URL --src SRC --speed max RECORDING
 //
-// with no --clock, so the replay dates its first frame 2026-01-01T00:00:00Z. The
-// session and run ids are ULIDs ecu mints, so they change on every capture. It
-// fails unless the recording has the sha256 given and the subscription saw every
-// message the streams stored. From the repository's root, the two fixtures here:
+// with no --clock, so the replay dates its first frame 2026-01-01T00:00:00Z. It
+// fails unless the recording's sha256 is the -sha256 flag's, which the person
+// running it copies from paddock's recordings/SOURCES.yaml, and unless the
+// subscription saw every message the streams stored.
+//
+// A capture is reproducible in content, not in bytes: the session and run ids
+// are ULIDs ecu mints anew, and where the events fall among the frames depends
+// on when each was published, so a new capture always changes the fixture's
+// sha256, even from the same ecu. The frames, the events and their order among
+// themselves stay the same.
+//
+// From the repository's root, the two fixtures here:
 //
 //	go run testdata/replays/capture.go -src replay-suzuka \
 //	    -recording PADDOCK/recordings/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz \
 //	    -sha256 9684c2ee9e1da825b0870b22bfec81ecff833a3ae20e523c0efc61e8863e5bdb \
-//	    > testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz
+//	    > testdata/replays/suzuka-pit-stop-2026-10-15.jsonl.gz
 //	go run testdata/replays/capture.go -src replay-suzuka-no-stop \
 //	    -recording PADDOCK/recordings/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz \
 //	    -sha256 0477116644a19ab97aac4c19dbecaa4129ee691c57378562cf36c7a094c4aeaa \
-//	    > testdata/replays/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz
+//	    > testdata/replays/suzuka-no-stop-2026-10-15.jsonl.gz
 //
-// The recording is paddock's copy of v1's fixture, in a paddock clone's
-// recordings/, its sha256 from SOURCES.yaml there.
+// PADDOCK is a paddock clone; its recordings/ holds v1's fixtures.
 // nats-server is the one the runner tests download (TWR_TEST_NATS_SERVER, or the
 // user's cache), or -nats-server. After a capture, update the fixture's sha256,
 // and the ecu version and recording sum beside it, in replayFixtures in

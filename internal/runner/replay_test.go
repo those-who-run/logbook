@@ -25,8 +25,8 @@ import (
 // testdata/replays/capture.go, which says where they came from and how to make
 // them again; internal/store's TestTheReplayFixturesAreTheCaptures pins them.
 const (
-	suzukaPitStop = "../../testdata/replays/real-nuc-suzuka-pit-stop-2026-10-15.jsonl.gz"
-	suzukaNoStop  = "../../testdata/replays/real-nuc-suzuka-no-stop-2026-10-15.jsonl.gz"
+	suzukaPitStop = "../../testdata/replays/suzuka-pit-stop-2026-10-15.jsonl.gz"
+	suzukaNoStop  = "../../testdata/replays/suzuka-no-stop-2026-10-15.jsonl.gz"
 )
 
 // captured is one message of a replay fixture, as ecu published it.
