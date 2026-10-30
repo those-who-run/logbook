@@ -593,11 +593,11 @@ func (f *faultStore) StageFrames(ctx context.Context, frames []store.StagedFrame
 	return f.storeAPI.StageFrames(ctx, frames)
 }
 
-func (f *faultStore) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (int, int, error) {
+func (f *faultStore) WriteStagedLap(ctx context.Context, src, run string, lap *eventsv1.LapCompleted) (int, int, error) {
 	if f.failing("WriteStagedLap", lap) {
 		return 0, 0, errInjected
 	}
-	return f.storeAPI.WriteStagedLap(ctx, src, lap)
+	return f.storeAPI.WriteStagedLap(ctx, src, run, lap)
 }
 
 // failingOnce makes the call fail the first time when says it should.

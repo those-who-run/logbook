@@ -31,7 +31,8 @@ type storeAPI interface {
 	StageFrames(ctx context.Context, frames []store.StagedFrame) error
 	HasLap(ctx context.Context, src, sessionID string, lap int32) (bool, error)
 	LapsWritten(ctx context.Context, src, sessionID string) ([]int32, error)
-	WriteStagedLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (int, int, error)
+	ContinueSession(ctx context.Context, src, sessionID string, c store.Continuation) error
+	WriteStagedLap(ctx context.Context, src, run string, lap *eventsv1.LapCompleted) (int, int, error)
 	EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) error
 	DropStaged(ctx context.Context, src, sessionID string) error
 }
@@ -43,9 +44,10 @@ type storeError struct{ error }
 
 // The ce-types the runner writes; every other one is acked and ignored.
 var (
-	typeStarted = mustType(&eventsv1.SessionStarted{})
-	typeLap     = mustType(&eventsv1.LapCompleted{})
-	typeEnded   = mustType(&eventsv1.SessionEnded{})
+	typeStarted   = mustType(&eventsv1.SessionStarted{})
+	typeContinued = mustType(&eventsv1.SessionContinued{})
+	typeLap       = mustType(&eventsv1.LapCompleted{})
+	typeEnded     = mustType(&eventsv1.SessionEnded{})
 )
 
 func mustType(m proto.Message) string {
@@ -57,21 +59,20 @@ func mustType(m proto.Message) string {
 }
 
 // session is an open session as the runner tracks it: where its frames start, the
-// ecu run they come from, the highest seq staged, and the lap events and end that
-// wait for their frames.
+// ecu runs they come from (its legs), and the lap events and end that wait for
+// their frames.
 type session struct {
 	src, id  string
 	firstSeq uint32
 	// startedAt is the session's started_at, to the microsecond the index keeps:
 	// the ce-time of its first frame, which with firstSeq picks out that frame.
 	startedAt time.Time
-	// run is the ecu run of the session's first frame, "" until that frame is
-	// seen. Only frames of its run join a session, so a session whose frames are
-	// gone never takes another run's.
-	run      string
-	readBack bool  // the first frame is still to be looked for in TELEMETRY
-	order    int   // when it was opened, against a tie on firstSeq
-	high     int64 // the highest seq staged, -1 for none
+	// legs is the session's runs in order: the run of its first frame, then each
+	// run that continued it after an ecu restart (session.continued, paddock#76).
+	// Only frames of a leg's run, from its first seq on, join a session, so a
+	// session whose frames are gone never takes another run's.
+	legs  []*leg
+	order int // when it was opened, against a tie on firstSeq
 	// lastFrame is when a frame of the session was last staged: a lap times out
 	// only once its frames have stopped coming, not while a catch-up streams them.
 	lastFrame time.Time
@@ -79,6 +80,50 @@ type session struct {
 	skipped   map[int32]bool // laps not written because the session's frames are gone
 	end       *held[*eventsv1.SessionEnded]
 	endAt     time.Time
+}
+
+// leg is one ecu run's part of a session. A seq counts within its run, so each leg
+// keeps its own frames and its own highest seq.
+type leg struct {
+	// run is the leg's ecu run. The first leg's is "" until its first frame is
+	// seen; a continued leg's is SessionContinued's run_id.
+	run string
+	// from is the leg's first seq in its run: the session's first_seq, or
+	// SessionContinued's at.
+	from uint32
+	// lap is the session's first lap the leg's run published: 1, or the lap the
+	// gap fell in.
+	lap int32
+	// at is the ce-time of the leg's first frame, where a read-back starts.
+	at       time.Time
+	readBack bool  // the leg's first frames are still to be looked for in TELEMETRY
+	high     int64 // the highest seq staged, -1 for none
+}
+
+// first is the leg of the session's first frame.
+func (s *session) first() *leg { return s.legs[0] }
+
+// legOf is the leg of run, or nil.
+func (s *session) legOf(run string) *leg {
+	for _, l := range s.legs {
+		if l.run != "" && l.run == run {
+			return l
+		}
+	}
+	return nil
+}
+
+// lapLeg is the leg whose run published lap n: the last that starts at or before
+// it. ecu numbers the laps on across a restart, so the numbers say which run's
+// seqs a lap's bounds count in.
+func (s *session) lapLeg(n int32) *leg {
+	out := s.legs[0]
+	for _, l := range s.legs[1:] {
+		if l.lap <= n {
+			out = l
+		}
+	}
+	return out
 }
 
 // held is an event waiting for its frames, with the message to ack once it is
@@ -129,8 +174,15 @@ func (c *consumer) restore(ctx context.Context) error {
 	}
 	for _, o := range open {
 		s := c.add(o.Src, o.ID, o.FirstSeq, o.StartedAt)
-		s.run, s.high = o.Run, o.MaxStaged
-		s.readBack = s.run == ""
+		f := s.first()
+		f.run, f.high = o.Run, o.MaxStaged
+		f.readBack = f.run == ""
+		for _, k := range o.Continued {
+			// A stop between the continue's commit and its read-back would leave the
+			// read-back undone: look again while the leg has nothing staged.
+			s.legs = append(s.legs, &leg{run: k.Run, from: k.FromSeq, lap: k.FromLap, at: k.At,
+				high: k.MaxStaged, readBack: k.MaxStaged < 0})
+		}
 	}
 	if len(open) > 0 {
 		c.log.InfoContext(ctx, "open sessions restored", "sessions", len(open))
@@ -144,8 +196,10 @@ func (c *consumer) add(src, id string, firstSeq uint32, startedAt time.Time) *se
 		return s
 	}
 	c.opened++
-	s := &session{src: src, id: id, firstSeq: firstSeq, startedAt: startedAt.UTC().Truncate(time.Microsecond),
-		order: c.opened, high: -1, lastFrame: c.now(), readBack: true,
+	at := startedAt.UTC().Truncate(time.Microsecond)
+	s := &session{src: src, id: id, firstSeq: firstSeq, startedAt: at,
+		legs:  []*leg{{from: firstSeq, lap: 1, at: at, readBack: true, high: -1}},
+		order: c.opened, lastFrame: c.now(),
 		laps: map[int32]*held[*eventsv1.LapCompleted]{}, skipped: map[int32]bool{}}
 	c.open[key] = s
 	return s
@@ -310,6 +364,13 @@ func (c *consumer) event(ctx context.Context, m jetstream.Msg) error {
 			return c.drop(ctx, m, derr)
 		}
 		err = c.started(ctx, src, &ev, m)
+	case typeContinued:
+		var ev eventsv1.SessionContinued
+		e, derr := ce.Decode(h, m.Data(), &ev)
+		if derr != nil {
+			return c.drop(ctx, m, derr)
+		}
+		err = c.continued(ctx, src, &ev, e.Time, m)
 	case typeLap:
 		var ev eventsv1.LapCompleted
 		if _, derr := ce.Decode(h, m.Data(), &ev); derr != nil {
@@ -386,31 +447,37 @@ func (c *consumer) readBacks(ctx, wctx context.Context) error {
 	var last uint64
 	asked := false
 	for _, s := range c.sorted() {
-		if !s.readBack || s.run != "" {
-			s.readBack = false
-			continue
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		if !asked {
-			// Once a round: how far logbook's own consumer has been given frames.
-			info, err := c.frames.Info(wctx)
-			if err != nil {
-				return err
+		for i, l := range s.legs {
+			if !l.readBack || (i == 0 && l.run != "") {
+				l.readBack = false
+				continue
 			}
-			last, asked = info.Delivered.Stream, true
-		}
-		if last > 0 {
-			err := c.readBack(wctx, s, last)
-			if errors.Is(err, errStopped) {
+			if ctx.Err() != nil {
 				return nil
 			}
-			if err != nil {
-				return err
+			if !asked {
+				// Once a round: how far logbook's own consumer has been given frames.
+				info, err := c.frames.Info(wctx)
+				if err != nil {
+					return err
+				}
+				last, asked = info.Delivered.Stream, true
 			}
+			if last > 0 {
+				read := c.readBack
+				if i > 0 {
+					read = func(ctx context.Context, s *session, last uint64) error { return c.readBackLeg(ctx, s, l, last) }
+				}
+				err := read(wctx, s, last)
+				if errors.Is(err, errStopped) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+			}
+			l.readBack = false
 		}
-		s.readBack = false
 	}
 	return nil
 }
@@ -505,20 +572,45 @@ func (c *consumer) readBack(ctx context.Context, s *session, last uint64) error 
 	if err != nil || run == "" {
 		return err
 	}
-	s.run = run
-	until := c.nextFirstSeq(s)
+	s.first().run = run
+	return c.stageRead(ctx, s, s.first(), found)
+}
+
+// readBackLeg reads back the first frames of a run that continued a session: its
+// source from a little before the leg's first frame up to the last frame
+// logbook's own consumer has been given, the run's frames from the leg's first
+// seq on. session.continued comes on the run's first frame of the session, so
+// those frames can have passed through, acked and not staged, before it.
+func (c *consumer) readBackLeg(ctx context.Context, s *session, l *leg, last uint64) error {
+	var found []*telemetryv1.Frame
+	err := c.readSource(ctx, s.src, l.at.Add(-readBackMargin), last,
+		func(r string, _ time.Time, f *telemetryv1.Frame) {
+			if r == l.run {
+				found = append(found, f)
+			}
+		})
+	if err != nil {
+		return err
+	}
+	return c.stageRead(ctx, s, l, found)
+}
+
+// stageRead stages the frames read back for a leg: those from its first seq up to
+// the next session of its run.
+func (c *consumer) stageRead(ctx context.Context, s *session, l *leg, found []*telemetryv1.Frame) error {
+	until := c.nextFrom(s, l)
 	var staged []store.StagedFrame
 	for _, f := range found {
-		if f.GetSeq() >= s.firstSeq && (until < 0 || int64(f.GetSeq()) < until) {
-			staged = append(staged, store.StagedFrame{Src: s.src, SessionID: s.id, Run: run, Frame: f})
-			s.high = max(s.high, int64(f.GetSeq()))
+		if f.GetSeq() >= l.from && (until < 0 || int64(f.GetSeq()) < until) {
+			staged = append(staged, store.StagedFrame{Src: s.src, SessionID: s.id, Run: l.run, Frame: f})
+			l.high = max(l.high, int64(f.GetSeq()))
 		}
 	}
 	if err := c.st.StageFrames(ctx, staged); err != nil {
 		return storeError{err}
 	}
 	s.lastFrame = c.now()
-	c.log.InfoContext(ctx, "first frames read back", "src", s.src, "session", s.id, "frames", len(staged))
+	c.log.InfoContext(ctx, "first frames read back", "src", s.src, "session", s.id, "run", l.run, "frames", len(staged))
 	return nil
 }
 
@@ -555,13 +647,18 @@ func (s *session) fitsStart(seq uint32, at time.Time) bool {
 	return off <= fitSlack
 }
 
-// nextFirstSeq is the first seq of the next session of s's source and run, where
-// s's frames end, or -1 for none.
-func (c *consumer) nextFirstSeq(s *session) int64 {
+// nextFrom is the first seq of the next session of s's source in l's run, where
+// the leg's frames end, or -1 for none.
+func (c *consumer) nextFrom(s *session, l *leg) int64 {
 	until := int64(-1)
 	for _, o := range c.open {
-		if o != s && o.src == s.src && o.run == s.run && o.firstSeq > s.firstSeq && (until < 0 || int64(o.firstSeq) < until) {
-			until = int64(o.firstSeq)
+		if o == s || o.src != s.src {
+			continue
+		}
+		for _, ol := range o.legs {
+			if ol.run == l.run && ol.from > l.from && (until < 0 || int64(ol.from) < until) {
+				until = int64(ol.from)
+			}
 		}
 	}
 	return until
@@ -605,12 +702,14 @@ func (c *consumer) lateLap(ctx context.Context, src string, ev *eventsv1.LapComp
 	if err != nil {
 		return storeError{err}
 	}
-	switch {
-	case info.State == store.SessionUnknown:
+	if info.State == store.SessionUnknown {
 		c.log.WarnContext(ctx, "lap of a session never started; dropped",
 			"src", src, "session", ev.GetSessionId(), "lap", ev.GetLap())
 		return term(m)
-	case info.Run == "":
+	}
+	// The run that published the lap: its bounds count in that run's seqs.
+	lapRun := store.RunOf(info.Run, info.Continued, ev.GetLap())
+	if lapRun == "" {
 		c.log.WarnContext(ctx, "lap not written: its session's frames are gone",
 			"src", src, "session", ev.GetSessionId(), "lap", ev.GetLap())
 		return ack(m)
@@ -622,7 +721,7 @@ func (c *consumer) lateLap(ctx context.Context, src string, ev *eventsv1.LapComp
 	var frames []store.StagedFrame
 	err = c.readSource(ctx, src, info.StartedAt.Add(-readBackMargin), fi.Delivered.Stream,
 		func(run string, _ time.Time, f *telemetryv1.Frame) {
-			if run == info.Run && f.GetSeq()+1 >= ev.GetFirstSeq() && f.GetSeq() <= ev.GetLastSeq() {
+			if run == lapRun && f.GetSeq()+1 >= ev.GetFirstSeq() && f.GetSeq() <= ev.GetLastSeq() {
 				frames = append(frames, store.StagedFrame{Src: src, SessionID: ev.GetSessionId(), Run: run, Frame: f})
 			}
 		})
@@ -636,7 +735,7 @@ func (c *consumer) lateLap(ctx context.Context, src string, ev *eventsv1.LapComp
 	if err := c.st.StageFrames(ctx, frames); err != nil {
 		return storeError{err}
 	}
-	staged, written, err := c.st.WriteStagedLap(ctx, src, ev)
+	staged, written, err := c.st.WriteStagedLap(ctx, src, lapRun, ev)
 	if err != nil {
 		return storeError{err}
 	}
@@ -644,6 +743,44 @@ func (c *consumer) lateLap(ctx context.Context, src string, ev *eventsv1.LapComp
 		return storeError{err}
 	}
 	c.wrote(ctx, src, ev, staged, written, false)
+	return ack(m)
+}
+
+// continued binds an open session to the run that continued it after an ecu
+// restart (paddock#76): that run's frames from the event's at on join the
+// session, apart from the earlier run's, and its laps, from the lap the gap fell
+// in, are written from them. ecu numbers the laps on across the gap; logbook
+// takes them as they come. A run continues a session once, so a redelivery
+// changes nothing.
+func (c *consumer) continued(ctx context.Context, src string, ev *eventsv1.SessionContinued, at time.Time, m jetstream.Msg) error {
+	if err := store.CheckKey(src, ev.GetSessionId()); err != nil || ev.GetRunId() == "" {
+		return c.drop(ctx, m, errors.Join(err, errIf(ev.GetRunId() == "", "no run_id")))
+	}
+	s, ok := c.open[[2]string{src, ev.GetSessionId()}]
+	if !ok {
+		info, err := c.st.Session(ctx, src, ev.GetSessionId())
+		if err != nil {
+			return storeError{err}
+		}
+		if info.State == store.SessionUnknown {
+			c.log.WarnContext(ctx, "continue of a session never started; dropped", "src", src, "session", ev.GetSessionId())
+			return term(m)
+		}
+		// Ended already: a redelivery after the end changes nothing.
+		return ack(m)
+	}
+	if s.legOf(ev.GetRunId()) != nil {
+		return ack(m) // delivered again
+	}
+	k := store.Continuation{Run: ev.GetRunId(), FromSeq: ev.GetAt(), FromLap: max(ev.GetGap().GetLap(), 1),
+		At: at.UTC().Truncate(time.Microsecond)}
+	if err := c.st.ContinueSession(ctx, src, ev.GetSessionId(), k); err != nil {
+		return storeError{err}
+	}
+	s.legs = append(s.legs, &leg{run: k.Run, from: k.FromSeq, lap: k.FromLap, at: k.At, readBack: true, high: -1})
+	s.lastFrame = c.now()
+	c.log.InfoContext(ctx, "session continued", "src", src, "session", s.id, "run", k.Run, "at", k.FromSeq,
+		"lap", k.FromLap)
 	return ack(m)
 }
 
@@ -693,13 +830,13 @@ func (c *consumer) stage(ctx context.Context, msgs []jetstream.Msg) error {
 			c.log.WarnContext(ctx, "frame dropped", "subject", m.Subject(), "err", err)
 			continue
 		}
-		s := c.place(src, runOf(e.ID), f.GetSeq(), e.Time)
+		s, l := c.place(src, runOf(e.ID), f.GetSeq(), e.Time)
 		if s == nil {
 			continue
 		}
-		s.high = max(s.high, int64(f.GetSeq()))
+		l.high = max(l.high, int64(f.GetSeq()))
 		s.lastFrame = now
-		staged = append(staged, store.StagedFrame{Src: src, SessionID: s.id, Run: s.run, Frame: &f})
+		staged = append(staged, store.StagedFrame{Src: src, SessionID: s.id, Run: l.run, Frame: &f})
 	}
 	last := msgs[len(msgs)-1]
 	if err := c.st.StageFrames(ctx, staged); err != nil {
@@ -718,32 +855,50 @@ func (c *consumer) stage(ctx context.Context, msgs []jetstream.Msg) error {
 }
 
 // place is the open session of src a frame of run, with seq and ce-time at, belongs
-// to. Of the source's sessions whose frames start at or before seq, latest first:
-// one bound to the frame's run takes it; one with no run yet takes it, and the
-// run, if the frame is its first frame or fits its start (fitsStart); one bound to
-// another run is passed over. So a session whose first frame is still to come
-// takes it from an earlier session of the same run, and a session that only fits
-// never takes a frame its run's own session would.
-func (c *consumer) place(src, run string, seq uint32, at time.Time) *session {
-	var candidates []*session
+// to, and the session's leg it joins. Of the source's sessions whose leg in the
+// frame's run starts at or before seq, or, with no leg in that run, whose frames
+// start at or before seq, latest first: one with a leg in the frame's run takes
+// it; one whose first leg has no run yet takes it, and the run, if the frame is
+// its first frame or fits its start (fitsStart); one bound to other runs is passed
+// over. So a session whose first frame is still to come takes it from an earlier
+// session of the same run, a session that only fits never takes a frame its run's
+// own session would, and a continued session takes its new run's frames from the
+// continue on (paddock#76).
+func (c *consumer) place(src, run string, seq uint32, at time.Time) (*session, *leg) {
+	type candidate struct {
+		s    *session
+		from uint32
+		l    *leg // the session's leg in the frame's run, or nil
+	}
+	var candidates []candidate
 	for _, s := range c.open {
-		if s.src == src && s.firstSeq <= seq {
-			candidates = append(candidates, s)
+		if s.src != src {
+			continue
+		}
+		if l := s.legOf(run); l != nil {
+			if l.from <= seq {
+				candidates = append(candidates, candidate{s, l.from, l})
+			}
+			continue
+		}
+		if s.firstSeq <= seq {
+			candidates = append(candidates, candidate{s, s.firstSeq, nil})
 		}
 	}
-	slices.SortFunc(candidates, func(a, b *session) int {
-		return cmp.Or(cmp.Compare(b.firstSeq, a.firstSeq), cmp.Compare(b.order, a.order))
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		return cmp.Or(cmp.Compare(b.from, a.from), cmp.Compare(b.s.order, a.s.order))
 	})
-	for _, s := range candidates {
+	for _, k := range candidates {
+		f := k.s.first()
 		switch {
-		case run != "" && s.run == run:
-			return s
-		case s.run == "" && (s.isFirst(seq, at) || s.fitsStart(seq, at)):
-			s.run, s.readBack = run, false
-			return s
+		case k.l != nil:
+			return k.s, k.l
+		case f.run == "" && (k.s.isFirst(seq, at) || k.s.fitsStart(seq, at)):
+			f.run, f.readBack = run, false
+			return k.s, f
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // settle writes every lap that is ready, in order, and then the end of every
@@ -756,7 +911,7 @@ func (c *consumer) settle(ctx, wctx context.Context) error {
 	for _, s := range c.sorted() {
 		for _, n := range slices.Sorted(maps.Keys(s.laps)) {
 			p := s.laps[n]
-			ready := s.high >= int64(p.ev.GetLastSeq())
+			ready := s.lapLeg(n).high >= int64(p.ev.GetLastSeq())
 			timedOut := !now.Before(later(p.since, s.lastFrame).Add(c.cfg.FramesTimeout))
 			if !ready && !timedOut {
 				break
@@ -829,7 +984,8 @@ func (c *consumer) endSession(ctx context.Context, s *session) error {
 
 func (c *consumer) writeLap(ctx context.Context, s *session, p *held[*eventsv1.LapCompleted], timedOut bool) error {
 	lap := p.ev
-	if s.run == "" {
+	run := s.lapLeg(lap.GetLap()).run
+	if run == "" {
 		// No frame of the session ever came: its frames have aged out of
 		// TELEMETRY, as on a first start against a long EVENTS history. A lap row
 		// with no frames would only mislead.
@@ -843,7 +999,7 @@ func (c *consumer) writeLap(ctx context.Context, s *session, p *held[*eventsv1.L
 			return storeError{err}
 		}
 	}
-	staged, written, err := c.st.WriteStagedLap(ctx, s.src, lap)
+	staged, written, err := c.st.WriteStagedLap(ctx, s.src, run, lap)
 	if err != nil {
 		return storeError{err}
 	}

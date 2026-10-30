@@ -51,7 +51,7 @@ func TestALapFromStagedFramesEqualsOneFromItsFrames(t *testing.T) {
 		t.Fatalf("staged %q, want every frame once", got)
 	}
 	for _, lap := range sess.laps {
-		n, written, err := s.WriteStagedLap(ctx, "live", lap)
+		n, written, err := s.WriteStagedLap(ctx, "live", run, lap)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestALapWithFramesMissing(t *testing.T) {
 	}
 	stage(t, s, sess, 0, 100)
 	lap := sess.laps[0]
-	n, written, err := s.WriteStagedLap(t.Context(), "live", lap)
+	n, written, err := s.WriteStagedLap(t.Context(), "live", run, lap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,8 +128,8 @@ func TestALapWithFramesMissing(t *testing.T) {
 }
 
 // A session takes the run of its first staged frame and keeps it; the open
-// sessions come back with their runs and highest staged seq, and an ended one
-// does not.
+// sessions come back with their runs and the highest seq staged in each, and an
+// ended one does not.
 func TestOpenSessionsAndTheirRuns(t *testing.T) {
 	ctx := t.Context()
 	s := open(t, t.TempDir())
@@ -156,7 +156,9 @@ func TestOpenSessionsAndTheirRuns(t *testing.T) {
 	}
 	got := fmt.Sprint(open[0].Src, open[0].ID, open[0].Run, open[0].MaxStaged, open[0].FirstSeq, " ",
 		open[1].Src, open[1].Run, open[1].MaxStaged)
-	want := fmt.Sprint("live", sid, run, a.frames[60].GetSeq(), a.started.GetFirstSeq(), " ", "replay-x", "", -1)
+	// A frame of another run is staged under its run, and not counted in the
+	// session's own.
+	want := fmt.Sprint("live", sid, run, a.frames[49].GetSeq(), a.started.GetFirstSeq(), " ", "replay-x", "", -1)
 	if len(open) != 2 || got != want {
 		t.Errorf("open sessions %v, want %s", open, want)
 	}
@@ -195,15 +197,15 @@ func TestStagingRefusesWhatItCannotStore(t *testing.T) {
 	if err := s.StageFrames(ctx, []StagedFrame{{Src: "../x", SessionID: sid, Frame: sess.frames[0]}}); err == nil {
 		t.Error("staged a frame under ../x")
 	}
-	if _, _, err := s.WriteStagedLap(ctx, "live", sess.laps[0]); !errors.Is(err, ErrUnknownSession) {
+	if _, _, err := s.WriteStagedLap(ctx, "live", run, sess.laps[0]); !errors.Is(err, ErrUnknownSession) {
 		t.Errorf("a lap of no session: %v", err)
 	}
-	if _, _, err := s.WriteStagedLap(ctx, "nope", sess.laps[0]); err == nil {
+	if _, _, err := s.WriteStagedLap(ctx, "nope", run, sess.laps[0]); err == nil {
 		t.Error("wrote a lap under source nope")
 	}
 	bad := race("live", sid).laps[0]
 	bad.Lap = 0
-	if _, _, err := s.WriteStagedLap(ctx, "live", bad); err == nil {
+	if _, _, err := s.WriteStagedLap(ctx, "live", run, bad); err == nil {
 		t.Error("wrote lap 0")
 	}
 	if err := s.DropStaged(ctx, "live", "x"); err == nil {
@@ -291,7 +293,7 @@ func TestTheNextLapStillSeesThePreviousLapsLastFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, l := range []*eventsv1.LapCompleted{lap1, lap2} {
-		if _, _, err := s.WriteStagedLap(ctx, "live", l); err != nil {
+		if _, _, err := s.WriteStagedLap(ctx, "live", run, l); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -312,10 +314,10 @@ func TestALaterLapLeavesAnEarlierLapsFrames(t *testing.T) {
 		t.Fatal(err)
 	}
 	stage(t, s, sess, 0, len(sess.frames))
-	if _, _, err := s.WriteStagedLap(ctx, "live", sess.laps[2]); err != nil {
+	if _, _, err := s.WriteStagedLap(ctx, "live", run, sess.laps[2]); err != nil {
 		t.Fatal(err)
 	}
-	n, written, err := s.WriteStagedLap(ctx, "live", sess.laps[1])
+	n, written, err := s.WriteStagedLap(ctx, "live", run, sess.laps[1])
 	if want := int(sess.laps[1].GetLastSeq() - sess.laps[1].GetFirstSeq() + 1); err != nil || n != want || written != want {
 		t.Errorf("lap 2 after lap 3: %d staged, %d written, %v; want %d", n, written, err, want)
 	}

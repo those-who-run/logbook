@@ -102,3 +102,36 @@ func TestAFailedMigrationChangesNothing(t *testing.T) {
 		}
 	})
 }
+
+// Schema version 4 keys staged frames by run as well (paddock#76): an index at
+// version 3 keeps the frames it had staged.
+func TestVersion4KeepsTheStagedFrames(t *testing.T) {
+	dir := t.TempDir()
+	withIndex(t, dir, func(db *sql.DB) {
+		ctx := t.Context()
+		if _, err := db.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		for v := range 3 {
+			if err := step(ctx, db, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO frames_pending VALUES ('live', 'x', 7, 'r', 'f')`); err != nil {
+			t.Fatal(err)
+		}
+	})
+	s, err := Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	withIndex(t, dir, func(db *sql.DB) {
+		got := rowsOf(t, t.Context(), db, `SELECT src, session_id, seq, run, frame FROM frames_pending`)
+		if want := [][]string{{"live", "x", "7", "r", "f"}}; !slices.EqualFunc(got, want, slices.Equal) {
+			t.Errorf("staged %q after the migration, want %q", got, want)
+		}
+	})
+}

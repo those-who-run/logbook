@@ -85,6 +85,36 @@ ALTER TABLE sessions ADD COLUMN ended_fuel_used DOUBLE;
 ALTER TABLE sessions ADD COLUMN ended_final_position INTEGER;
 ALTER TABLE sessions ADD COLUMN session_kind VARCHAR;
 `,
+	// 4: a session continued in a later ecu run after a restart (paddock#76,
+	// session.continued). session_runs holds each run that continued a session:
+	// its frames from from_seq, in that run's seqs, and the session's laps from
+	// from_lap, the lap the gap fell in. sessions.run stays the run of the
+	// session's first frame. A seq counts within its run, so a staged frame is
+	// keyed by its run as well: the earlier run's frames never mix with the
+	// later run's under the same seq. DuckDB cannot change a primary key in
+	// place, so frames_pending is made again with its rows.
+	`
+CREATE TABLE session_runs (
+    src VARCHAR NOT NULL,
+    session_id VARCHAR NOT NULL,
+    run VARCHAR NOT NULL,
+    from_seq BIGINT NOT NULL,
+    from_lap INTEGER NOT NULL,
+    continued_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (src, session_id, run)
+);
+CREATE TABLE frames_pending_4 (
+    src VARCHAR NOT NULL,
+    session_id VARCHAR NOT NULL,
+    seq BIGINT NOT NULL,
+    run VARCHAR NOT NULL,
+    frame BLOB NOT NULL,
+    PRIMARY KEY (src, session_id, run, seq)
+);
+INSERT INTO frames_pending_4 SELECT src, session_id, seq, run, frame FROM frames_pending;
+DROP TABLE frames_pending;
+ALTER TABLE frames_pending_4 RENAME TO frames_pending;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.
