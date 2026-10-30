@@ -229,6 +229,8 @@ func TestStagingRefusesWhatItCannotStore(t *testing.T) {
 	for name, err := range map[string]error{
 		"StageFrames": closed.StageFrames(ctx, []StagedFrame{{Src: "live", SessionID: sid, Frame: sess.frames[0]}}),
 		"DropStaged":  closed.DropStaged(ctx, "live", sid),
+		"ContinueSession": closed.ContinueSession(ctx, "live", sid,
+			Continuation{Run: run, FromSeq: 1, FromLap: 1, At: sess.endedAt}),
 		"OpenSessions": func() error {
 			_, err := closed.OpenSessions(ctx)
 			return err
