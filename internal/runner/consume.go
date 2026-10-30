@@ -947,8 +947,8 @@ func (c *consumer) settle(ctx, wctx context.Context) error {
 	return nil
 }
 
-// lapsMissing is whether a session's end should wait on: its summary counts laps
-// that have no row yet. A lap.completed can come after its session's end, as when
+// lapsMissing is whether a session's end should wait on: its summary has
+// complete laps (expectedLaps) that have no row yet. A lap.completed can come after its session's end, as when
 // both come again after a stop, each at the end of its own ack wait; the end waits
 // for it for an ack wait and a frames timeout from its own arrival, then applies
 // without it. Frames that go on coming do not extend the wait: a missing event
@@ -961,12 +961,33 @@ func (c *consumer) lapsMissing(ctx context.Context, s *session, now time.Time) (
 	if err != nil {
 		return false, storeError{err}
 	}
-	for n := int32(1); n <= s.end.ev.GetSummary().GetLapsCompleted(); n++ {
+	for _, n := range expectedLaps(s.end.ev.GetSummary()) {
 		if !slices.Contains(written, n) && !s.skipped[n] {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// expectedLaps is the laps a session's end waits for: the complete laps its
+// summary lists (contracts v0.2's laps), or, from an ecu that lists none, laps 1
+// to laps_completed. A lap the line was crossed in during an ecu restart's gap is
+// in the summary only, not complete and with no lap.completed (paddock#76), so
+// counting by number would wait for a lap that never comes.
+func expectedLaps(sum *eventsv1.SessionSummary) []int32 {
+	var out []int32
+	for _, l := range sum.GetLaps() {
+		if l.GetComplete() {
+			out = append(out, l.GetLap())
+		}
+	}
+	if len(sum.GetLaps()) > 0 {
+		return out
+	}
+	for n := int32(1); n <= sum.GetLapsCompleted(); n++ {
+		out = append(out, n)
+	}
+	return out
 }
 
 func (c *consumer) endSession(ctx context.Context, s *session) error {

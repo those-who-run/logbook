@@ -92,7 +92,9 @@ ALTER TABLE sessions ADD COLUMN session_kind VARCHAR;
 	// session's first frame. A seq counts within its run, so a staged frame is
 	// keyed by its run as well: the earlier run's frames never mix with the
 	// later run's under the same seq. DuckDB cannot change a primary key in
-	// place, so frames_pending is made again with its rows.
+	// place, so frames_pending is made again with its rows. With contracts v0.2
+	// the end reasons v0.1.5 did not name, stored as their bare numbers, get
+	// their names, as a session ended from then on stores them.
 	`
 CREATE TABLE session_runs (
     src VARCHAR NOT NULL,
@@ -114,6 +116,9 @@ CREATE TABLE frames_pending_4 (
 INSERT INTO frames_pending_4 SELECT src, session_id, seq, run, frame FROM frames_pending;
 DROP TABLE frames_pending;
 ALTER TABLE frames_pending_4 RENAME TO frames_pending;
+UPDATE sessions SET end_reason = CASE end_reason
+    WHEN '9' THEN 'timed_finish' WHEN '10' THEN 'menu' WHEN '11' THEN 'pause_limit' END
+WHERE end_reason IN ('9', '10', '11');
 `,
 }
 

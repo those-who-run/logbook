@@ -251,3 +251,27 @@ func TestAContinuedSessionIsRestored(t *testing.T) {
 	}
 	checkPair(t, p, dir, first, second)
 }
+
+// A session's end waits for the complete laps its summary lists. The lap an ecu
+// restart's gap took the line crossing of is in the summary alone, not complete
+// and with no lap.completed, so the end does not wait for it; from an ecu that
+// lists no laps, it waits for laps 1 to laps_completed.
+func TestTheEndWaitsForTheSummarysCompleteLaps(t *testing.T) {
+	lap := func(n int32, complete bool) *eventsv1.LapCompleted {
+		return &eventsv1.LapCompleted{Lap: n, Complete: complete}
+	}
+	for name, c := range map[string]struct {
+		sum  *eventsv1.SessionSummary
+		want []int32
+	}{
+		"listed": {&eventsv1.SessionSummary{LapsCompleted: 7, Laps: []*eventsv1.LapCompleted{
+			lap(1, true), lap(2, true), lap(3, true), lap(4, true), lap(5, true), lap(6, true),
+			lap(7, false), lap(8, true), lap(9, false)}}, []int32{1, 2, 3, 4, 5, 6, 8}},
+		"none listed": {&eventsv1.SessionSummary{LapsCompleted: 3}, []int32{1, 2, 3}},
+		"no summary":  {nil, nil},
+	} {
+		if got := expectedLaps(c.sum); !slices.Equal(got, c.want) {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
+	}
+}

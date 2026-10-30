@@ -34,6 +34,13 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   a lap row also records its frames' top and minimum speed, path length and
   largest single-frame jump. The schema is one ordered list of migrations, run
   at open; an index newer than the code is refused.
+- **A migration is one-way.** A logbook that brings the index to a new schema
+  version leaves it unreadable to the release before, which refuses it as
+  newer. Before deploying a release that migrates (schema version 4 came with
+  paddock#76), stop logbook and copy `index.duckdb`. Rolling back needs that
+  copy put back: the sessions and laps written since are lost from the index,
+  and the lap files already written stay under `sessions/`, where a later lap
+  write of the same lap replaces them.
 - **Staged frames.** `frames_pending` (keyed by `src`, `session_id`, `run`
   and `seq`) holds the frames of laps not yet written, each as its protobuf
   encoding with the ecu run that published it. A `seq` counts within its run,
@@ -158,8 +165,9 @@ number of sessions in its store and its schema version.
   never started is dropped with a warning.
 - **Events.** `session.started` opens the session. `lap.completed` waits
   until a frame of its run at or beyond the lap's `last_seq` is staged, then the lap is
-  written from its staged frames. `session.ended` waits for the laps it counts
-  (`laps_completed`), for at most an ack wait and the frames timeout from its
+  written from its staged frames. `session.ended` waits for the complete laps its
+  summary lists (`laps`; from an ecu that lists none, laps 1 to
+  `laps_completed`), for at most an ack wait and the frames timeout from its
   own arrival (40 s), then ends the session at its `ce-time`. A
   `lap.completed` that comes after its session's end has been applied still
   writes its row and leaves the summary as the end made it. The session's
