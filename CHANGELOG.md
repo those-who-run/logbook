@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/those-who-run/logbook/compare/v0.1.4...v0.1.5) (2026-10-30)
+
+
+### Features
+
+* **logbook:** follow a session ecu continues after a restart ([#25](https://github.com/those-who-run/logbook/issues/25)) ([3afe1a8](https://github.com/those-who-run/logbook/commit/3afe1a8c03e918a3efe28feb99cf3262f82cf04c))
+
 ## [0.1.4](https://github.com/those-who-run/logbook/compare/v0.1.3...v0.1.4) (2026-10-28)
 
 
