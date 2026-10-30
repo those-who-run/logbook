@@ -19,7 +19,7 @@ data directory, which only `logbook` reads and writes
 
 ```text
 logbook.lock                            held by the one process using the directory
-index.duckdb                            the sessions, laps and frames_pending tables
+index.duckdb                            the sessions, session_runs, laps and frames_pending tables
 sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 ```
 
@@ -34,13 +34,26 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   a lap row also records its frames' top and minimum speed, path length and
   largest single-frame jump. The schema is one ordered list of migrations, run
   at open; an index newer than the code is refused.
-- **Staged frames.** `frames_pending` (keyed by `src`, `session_id` and
-  `seq`) holds the frames of laps not yet written, each as its protobuf
-  encoding with the ecu run that published it. A lap's write deletes its own
+- **A migration is one-way.** A logbook that brings the index to a new schema
+  version leaves it unreadable to the release before, which refuses it as
+  newer. Before deploying a release that migrates (schema version 4 came with
+  paddock#76), stop logbook and copy `index.duckdb`. Rolling back needs that
+  copy put back: the sessions and laps written since are lost from the index,
+  and the lap files already written stay under `sessions/`, where a later lap
+  write of the same lap replaces them.
+- **Staged frames.** `frames_pending` (keyed by `src`, `session_id`, `run`
+  and `seq`) holds the frames of laps not yet written, each as its protobuf
+  encoding with the ecu run that published it. A `seq` counts within its run,
+  so the frames of two runs of one session never mix. A lap's write deletes its own
   frames there, all but its last, in the transaction that writes its row: the
   next lap reads that last frame, and an earlier lap written later still finds
   its own. A session's end deletes what is left. A session's `run` is the run
-  of its first frame, so a frame of another run never joins it.
+  of its first frame, so a frame of another run never joins it, unless that
+  run continued the session.
+- **Continued sessions.** `session_runs` (keyed by `src`, `session_id` and
+  `run`) holds each later ecu run that continued a session after an ecu
+  restart (paddock#76): its first `seq` of the session (`from_seq`, the
+  event's `at`), the lap the gap fell in (`from_lap`) and the event's time.
 - **A session's summary.** Until a session ends, its complete laps and best
   lap are worked out from its lap rows. From `session.ended` on, the summary
   columns (`laps_completed`, `best_lap_ms`, `final_position`, `end_reason`,
@@ -123,8 +136,9 @@ number of sessions in its store and its schema version.
   already on the frame's run takes the frame first. A session with none of its
   first 30 s of frames gets no run, and its laps are skipped as gone (below).
   Each fetched batch is placed: of the open sessions of its source whose first
-  `seq` is at or before its own, latest first, the frame goes to the first one
-  that is on its run, or has no run yet and whose first frame it is or fits.
+  `seq` in the frame's run (for a run that continued a session, its `at`) is
+  at or before its own, latest first, the frame goes to the first one that is
+  on its run, or has no run yet and whose first frame it is or fits.
   The batch is staged in `frames_pending` and acked once that commits. A frame
   outside every open session is acked and not staged.
 - **Read-back.** The two streams are read apart, so a session's first frames
@@ -136,10 +150,24 @@ number of sessions in its store and its schema version.
   two runs carry the first frame itself (two replays of one recording under
   one source), it takes the later. A stop is checked between
   fetches, and the ordered consumer is deleted when the read is done.
+- **After an ecu restart** (paddock#76). A graceful stop of ecu publishes no
+  `session.ended`: the session stays open in logbook, however long the gap,
+  until ecu continues it or ends it (`engineer_stopped`). logbook never ends
+  a session itself. `session.continued` binds the session to its `run_id` from
+  its `at` on: that run's frames from `at` join the session, kept apart from
+  the earlier run's though their `seq`s overlap, and are read back from
+  `TELEMETRY` from 1 min before the event's `ce-time`, as for a start. ecu
+  numbers the laps on across the gap, and logbook takes them as they come:
+  from the gap's lap on (`gap.lap`), a lap's `first_seq` and `last_seq` count
+  in the later run's `seq`s, and the lap is written from that run's frames. A
+  `session.continued` delivered again, or for a run already recorded, changes
+  nothing; one for a session that has ended is acked, and one for a session
+  never started is dropped with a warning.
 - **Events.** `session.started` opens the session. `lap.completed` waits
-  until a frame at or beyond the lap's `last_seq` is staged, then the lap is
-  written from its staged frames. `session.ended` waits for the laps it counts
-  (`laps_completed`), for at most an ack wait and the frames timeout from its
+  until a frame of its run at or beyond the lap's `last_seq` is staged, then the lap is
+  written from its staged frames. `session.ended` waits for the complete laps its
+  summary lists (`laps`; from an ecu that lists none, laps 1 to
+  `laps_completed`), for at most an ack wait and the frames timeout from its
   own arrival (40 s), then ends the session at its `ce-time`. A
   `lap.completed` that comes after its session's end has been applied still
   writes its row and leaves the summary as the end made it. The session's

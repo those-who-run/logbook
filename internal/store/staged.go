@@ -33,8 +33,35 @@ type OpenSession struct {
 	StartedAt time.Time
 	// Run is the run of the session's first staged frame, "" until one is staged.
 	Run string
-	// MaxStaged is the highest seq staged for the session, -1 when none is.
+	// MaxStaged is the highest seq staged for the session in Run, -1 when none is.
 	MaxStaged int64
+	// Continued is the later runs that continued the session, by FromLap.
+	Continued []Continuation
+}
+
+// Continuation is a later ecu run that continued a session after an ecu restart
+// (paddock#76, session.continued): the session's frames in that run from FromSeq
+// on, and its laps from FromLap, the lap the gap fell in, on.
+type Continuation struct {
+	Run     string
+	FromSeq uint32
+	FromLap int32
+	// At is the session.continued's ce-time, the time of the run's frame FromSeq.
+	At time.Time
+	// MaxStaged is the highest seq staged for the session in Run, -1 when none is
+	// (OpenSessions alone sets it).
+	MaxStaged int64
+}
+
+// RunOf is the run that published a session's lap n: the run that continued it
+// last at or before n, or run, the run of its first frame.
+func RunOf(run string, continued []Continuation, n int32) string {
+	for _, c := range continued {
+		if c.FromLap <= n {
+			run = c.Run
+		}
+	}
+	return run
 }
 
 // SessionState says whether a session is in the index, and whether it has ended.
@@ -53,7 +80,7 @@ const stageRows = 100
 
 // StageFrames writes frames to frames_pending in one transaction: a frame staged
 // again (a redelivery) overwrites its own row. Each session takes the run of its
-// first staged frame.
+// first staged frame, unless that run continued it (ContinueSession).
 func (s *Store) StageFrames(ctx context.Context, frames []StagedFrame) (err error) {
 	if len(frames) == 0 {
 		return nil
@@ -88,28 +115,30 @@ func (s *Store) StageFrames(ctx context.Context, frames []StagedFrame) (err erro
 		// arguments.
 		q := `INSERT INTO frames_pending (src, session_id, seq, run, frame) VALUES ` + //nolint:gosec // see above
 			strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?, ?), ", len(chunk)), ", ") +
-			` ON CONFLICT (src, session_id, seq) DO UPDATE SET run = excluded.run, frame = excluded.frame`
+			` ON CONFLICT (src, session_id, run, seq) DO UPDATE SET frame = excluded.frame`
 		if _, err = tx.ExecContext(ctx, q, args...); err != nil {
 			return fmt.Errorf("store: stage frames: %w", err)
 		}
 	}
 	for key, run := range runs {
-		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET run = ? WHERE src = ? AND id = ? AND run IS NULL`,
-			run, key[0], key[1]); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET run = ? WHERE src = ? AND id = ? AND run IS NULL
+AND NOT EXISTS (SELECT 1 FROM session_runs r WHERE r.src = sessions.src AND r.session_id = sessions.id AND r.run = ?)`,
+			run, key[0], key[1], run); err != nil {
 			return fmt.Errorf("store: stage frames: %w", err)
 		}
 	}
 	return tx.Commit()
 }
 
-// WriteStagedLap writes lap from the frames staged for its session, and in the
-// row's transaction deletes the lap's own staged frames but its last. The last
+// WriteStagedLap writes lap from the frames of run staged for its session: the run
+// that published lap, whose seqs its first_seq and last_seq count in. In the
+// row's transaction it deletes the lap's own staged frames but its last. The last
 // stays for the next lap, which reads it to tell whether a finished frame at its
 // start closes a race (racingFrames); frames outside the lap stay for the laps
 // they belong to, which may be written later (a lap.completed can come late).
 // DropStaged takes what is left when the session ends. It returns how many frames in the lap's seq range were staged, which
 // is fewer than the range when some never arrived, and how many the file holds.
-func (s *Store) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (staged, written int, err error) {
+func (s *Store) WriteStagedLap(ctx context.Context, src, run string, lap *eventsv1.LapCompleted) (staged, written int, err error) {
 	src = sourceOf(src)
 	if err := checkKey(src, lap.GetSessionId()); err != nil {
 		return 0, 0, err
@@ -125,7 +154,7 @@ func (s *Store) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.La
 	// The frame before the lap's first as well: it says whether a finished frame at
 	// the lap's start closes a race (racingFrames).
 	from := int64(lap.GetFirstSeq()) - 1
-	frames, err := s.stagedFrames(ctx, src, lap.GetSessionId(), from, int64(lap.GetLastSeq()))
+	frames, err := s.stagedFrames(ctx, src, lap.GetSessionId(), run, from, int64(lap.GetLastSeq()))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -136,8 +165,8 @@ func (s *Store) WriteStagedLap(ctx context.Context, src string, lap *eventsv1.La
 	}
 	written, err = s.writeLap(ctx, src, lap, frames, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM frames_pending
-WHERE src = ? AND session_id = ? AND seq >= ? AND seq < ?`,
-			src, lap.GetSessionId(), int64(lap.GetFirstSeq()), int64(lap.GetLastSeq()))
+WHERE src = ? AND session_id = ? AND run = ? AND seq >= ? AND seq < ?`,
+			src, lap.GetSessionId(), run, int64(lap.GetFirstSeq()), int64(lap.GetLastSeq()))
 		return err
 	})
 	if err != nil {
@@ -146,10 +175,10 @@ WHERE src = ? AND session_id = ? AND seq >= ? AND seq < ?`,
 	return staged, written, nil
 }
 
-func (s *Store) stagedFrames(ctx context.Context, src, sessionID string, from, to int64) (frames []*telemetryv1.Frame, err error) {
+func (s *Store) stagedFrames(ctx context.Context, src, sessionID, run string, from, to int64) (frames []*telemetryv1.Frame, err error) {
 	rows, err := s.index.QueryContext(ctx, `
-SELECT frame FROM frames_pending WHERE src = ? AND session_id = ? AND seq BETWEEN ? AND ? ORDER BY seq`,
-		src, sessionID, from, to)
+SELECT frame FROM frames_pending WHERE src = ? AND session_id = ? AND run = ? AND seq BETWEEN ? AND ? ORDER BY seq`,
+		src, sessionID, run, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("store: staged frames: %w", err)
 	}
@@ -191,13 +220,13 @@ func (s *Store) DropStaged(ctx context.Context, src, sessionID string) error {
 }
 
 // OpenSessions returns the sessions that have not ended, ordered by start, with
-// their runs and the highest seq staged for each.
+// their runs, the runs that continued them, and the highest seq staged for each.
 func (s *Store) OpenSessions(ctx context.Context) (out []OpenSession, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.index.QueryContext(ctx, `
 SELECT s.src, s.id, s.first_seq, s.started_at, coalesce(s.run, ''),
-    coalesce((SELECT max(seq) FROM frames_pending f WHERE f.src = s.src AND f.session_id = s.id), -1)
+    coalesce((SELECT max(seq) FROM frames_pending f WHERE f.src = s.src AND f.session_id = s.id AND f.run = s.run), -1)
 FROM sessions s WHERE s.ended_at IS NULL ORDER BY s.started_at, s.src, s.id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: open sessions: %w", err)
@@ -219,15 +248,79 @@ FROM sessions s WHERE s.ended_at IS NULL ORDER BY s.started_at, s.src, s.id`)
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: open sessions: %w", err)
 	}
+	for i := range out {
+		if out[i].Continued, err = s.continuations(ctx, out[i].Src, out[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// ContinueSession records that a later ecu run continued src's session (paddock#76):
+// c's Run, FromSeq, FromLap and At. A run continues a session once, so recording
+// it again changes nothing.
+func (s *Store) ContinueSession(ctx context.Context, src, sessionID string, c Continuation) error {
+	src = sourceOf(src)
+	if err := checkKey(src, sessionID); err != nil {
+		return err
+	}
+	if c.Run == "" {
+		return fmt.Errorf("store: continue %s/%s: no run", src, sessionID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.sessionExists(ctx, src, sessionID); err != nil {
+		return err
+	}
+	if _, err := s.index.ExecContext(ctx, `
+INSERT INTO session_runs (src, session_id, run, from_seq, from_lap, continued_at) VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT (src, session_id, run) DO NOTHING`,
+		src, sessionID, c.Run, int64(c.FromSeq), c.FromLap, c.At.UTC()); err != nil {
+		return fmt.Errorf("store: continue %s/%s: %w", src, sessionID, err)
+	}
+	return nil
+}
+
+// continuations is the runs that continued src's session, by FromLap, each with
+// the highest seq staged for it. The caller holds s.mu.
+func (s *Store) continuations(ctx context.Context, src, sessionID string) (out []Continuation, err error) {
+	rows, err := s.index.QueryContext(ctx, `
+SELECT r.run, r.from_seq, r.from_lap, r.continued_at,
+    coalesce((SELECT max(seq) FROM frames_pending f WHERE f.src = r.src AND f.session_id = r.session_id AND f.run = r.run), -1)
+FROM session_runs r WHERE r.src = ? AND r.session_id = ? ORDER BY r.from_lap, r.continued_at`, src, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("store: runs of %s/%s: %w", src, sessionID, err)
+	}
+	defer func() {
+		if cerr := rows.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("store: runs of %s/%s: %w", src, sessionID, cerr)
+		}
+	}()
+	for rows.Next() {
+		var (
+			c    Continuation
+			from int64
+		)
+		if err := rows.Scan(&c.Run, &from, &c.FromLap, &c.At, &c.MaxStaged); err != nil {
+			return nil, fmt.Errorf("store: runs of %s/%s: %w", src, sessionID, err)
+		}
+		c.FromSeq, c.At = uint32(from), c.At.UTC() //nolint:gosec // written from a uint32
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: runs of %s/%s: %w", src, sessionID, err)
+	}
 	return out, nil
 }
 
 // SessionInfo is what the index says of a session.
 type SessionInfo struct {
 	State SessionState
-	// Run is the run its frames came from, "" when none was ever staged.
+	// Run is the run its first frames came from, "" when none was ever staged.
 	Run       string
 	StartedAt time.Time
+	// Continued is the later runs that continued it (ContinueSession).
+	Continued []Continuation
 }
 
 // Session says whether src's session id is in the index, whether it has ended,
@@ -251,6 +344,9 @@ func (s *Store) Session(ctx context.Context, src, sessionID string) (SessionInfo
 	info := SessionInfo{State: SessionOpen, Run: run.String, StartedAt: started.UTC()}
 	if ended.Valid {
 		info.State = SessionEnded
+	}
+	if info.Continued, err = s.continuations(ctx, sourceOf(src), sessionID); err != nil {
+		return SessionInfo{}, err
 	}
 	return info, nil
 }

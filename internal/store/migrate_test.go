@@ -102,3 +102,50 @@ func TestAFailedMigrationChangesNothing(t *testing.T) {
 		}
 	})
 }
+
+// Schema version 4 keys staged frames by run as well (paddock#76): an index at
+// version 3 keeps the frames it had staged, and its end reasons stored as bare
+// numbers under contracts v0.1.5 get the names v0.2 gives them.
+func TestVersion4KeepsTheStagedFrames(t *testing.T) {
+	dir := t.TempDir()
+	withIndex(t, dir, func(db *sql.DB) {
+		ctx := t.Context()
+		if _, err := db.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		for v := range 3 {
+			if err := step(ctx, db, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO frames_pending VALUES ('live', 'x', 7, 'r', 'f')`); err != nil {
+			t.Fatal(err)
+		}
+		for i, reason := range []string{"9", "10", "11", "finished", "12"} {
+			if _, err := db.ExecContext(ctx, `INSERT INTO sessions (src, id, started_at, type, car_code, joined_part_way,
+    first_seq, end_reason) VALUES ('live', ?, '2026-10-30 12:00:00', 'race', 1, false, 1, ?)`, fmt.Sprint("s", i), reason); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	s, err := Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	withIndex(t, dir, func(db *sql.DB) {
+		got := rowsOf(t, t.Context(), db, `SELECT src, session_id, seq, run, frame FROM frames_pending`)
+		if want := [][]string{{"live", "x", "7", "r", "f"}}; !slices.EqualFunc(got, want, slices.Equal) {
+			t.Errorf("staged %q after the migration, want %q", got, want)
+		}
+		// The end reasons contracts v0.1.5 did not name get their names; the rest
+		// stay as they were.
+		got = rowsOf(t, t.Context(), db, `SELECT end_reason FROM sessions ORDER BY id`)
+		want := [][]string{{"timed_finish"}, {"menu"}, {"pause_limit"}, {"finished"}, {"12"}}
+		if !slices.EqualFunc(got, want, slices.Equal) {
+			t.Errorf("end reasons %q after the migration, want %q", got, want)
+		}
+	})
+}
