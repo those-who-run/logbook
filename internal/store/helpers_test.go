@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -167,7 +168,7 @@ func rowsOf(t *testing.T, ctx context.Context, db *sql.DB, q string, args ...any
 	}
 	var out [][]string
 	for rows.Next() {
-		vals := make([]sql.NullString, len(cols))
+		vals := make([]cell, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
@@ -188,6 +189,20 @@ func rowsOf(t *testing.T, ctx context.Context, db *sql.DB, q string, args ...any
 		t.Fatal(err)
 	}
 	return out
+}
+
+// cell is a value as a string: a JSON column, which the driver reads as a map or
+// a slice, as JSON again.
+type cell struct{ sql.NullString }
+
+func (c *cell) Scan(v any) error {
+	switch v.(type) {
+	case map[string]any, []any:
+		b, err := json.Marshal(v)
+		c.String, c.Valid = string(b), true
+		return err
+	}
+	return c.NullString.Scan(v)
 }
 
 // files returns every regular file under dir with its contents, by path relative

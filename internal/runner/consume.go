@@ -35,6 +35,7 @@ type storeAPI interface {
 	WriteStagedLap(ctx context.Context, src, run string, lap *eventsv1.LapCompleted) (int, int, error)
 	EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) error
 	DropStaged(ctx context.Context, src, sessionID string) error
+	MarkPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) error
 }
 
 // storeError is a write the store could not make. It stops the runner, unacked, so
@@ -48,6 +49,7 @@ var (
 	typeContinued = mustType(&eventsv1.SessionContinued{})
 	typeLap       = mustType(&eventsv1.LapCompleted{})
 	typeEnded     = mustType(&eventsv1.SessionEnded{})
+	typePosted    = mustType(&eventsv1.CardPosted{})
 )
 
 func mustType(m proto.Message) string {
@@ -384,6 +386,12 @@ func (c *consumer) event(ctx context.Context, m jetstream.Msg) error {
 			return c.drop(ctx, m, derr)
 		}
 		err = c.ended(ctx, src, &ev, e.Time, m)
+	case typePosted:
+		var ev eventsv1.CardPosted
+		if _, derr := ce.Decode(h, m.Data(), &ev); derr != nil {
+			return c.drop(ctx, m, derr)
+		}
+		err = c.posted(ctx, src, &ev, m)
 	default:
 		return ack(m)
 	}
@@ -808,6 +816,26 @@ func (c *consumer) ended(ctx context.Context, src string, ev *eventsv1.SessionEn
 	}
 	s.end.ev, s.end.msg, s.end.progress, s.endAt = ev, m, now, at
 	return nil
+}
+
+// posted records when podium posted the session's results card (card.posted,
+// paddock#67). It does not wait on the session's end: posted_at is a column of
+// its own. A redelivery changes nothing; a card of a session never started here
+// is dropped.
+func (c *consumer) posted(ctx context.Context, src string, ev *eventsv1.CardPosted, m jetstream.Msg) error {
+	if err := store.CheckKey(src, ev.GetSessionId()); err != nil || ev.GetPostedAt() == nil {
+		return c.drop(ctx, m, errors.Join(err, errIf(ev.GetPostedAt() == nil, "no posted_at")))
+	}
+	err := c.st.MarkPosted(ctx, src, ev)
+	if errors.Is(err, store.ErrUnknownSession) {
+		c.log.WarnContext(ctx, "card of a session never started; dropped", "src", src, "session", ev.GetSessionId())
+		return term(m)
+	}
+	if err != nil {
+		return storeError{err}
+	}
+	c.log.InfoContext(ctx, "card posted", "src", src, "session", ev.GetSessionId())
+	return ack(m)
 }
 
 // stage places each frame in its open session, stages those that have one, and

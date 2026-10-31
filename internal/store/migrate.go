@@ -120,6 +120,24 @@ UPDATE sessions SET end_reason = CASE end_reason
     WHEN '9' THEN 'timed_finish' WHEN '10' THEN 'menu' WHEN '11' THEN 'pause_limit' END
 WHERE end_reason IN ('9', '10', '11');
 `,
+	// 5: what ecu and podium publish that the pit wall reads (Rosberg, the schema 5
+	// issue). summary is session.ended's SessionSummary, whole, as protobuf JSON;
+	// car_name is the start's, then the summary's; track_id, track_name and
+	// track_sure are the summary's track verdict, sure when probable or confirmed as
+	// contracts' LiveTrack.sure and v1's sure_track_id read it; posted_at is
+	// card.posted's. A lap's pit_role and counts_for_best are its lap.completed's.
+	// Each is NULL in a row written before, until `logbook backfill` reads the
+	// events back from EVENTS.
+	`
+ALTER TABLE sessions ADD COLUMN summary JSON;
+ALTER TABLE sessions ADD COLUMN car_name VARCHAR;
+ALTER TABLE sessions ADD COLUMN track_id INTEGER;
+ALTER TABLE sessions ADD COLUMN track_name VARCHAR;
+ALTER TABLE sessions ADD COLUMN track_sure BOOLEAN;
+ALTER TABLE sessions ADD COLUMN posted_at TIMESTAMP;
+ALTER TABLE laps ADD COLUMN pit_role VARCHAR;
+ALTER TABLE laps ADD COLUMN counts_for_best BOOLEAN;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

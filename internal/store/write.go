@@ -29,8 +29,8 @@ func (s *Store) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) e
 	defer s.mu.Unlock()
 	_, err := s.index.ExecContext(ctx, `
 INSERT INTO sessions (src, id, started_at, type, car_code, total_laps, joined_part_way, first_seq,
-    started_fuel_at_start)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    started_fuel_at_start, car_name)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (src, id) DO UPDATE SET
     started_at = excluded.started_at,
     type = excluded.type,
@@ -38,11 +38,12 @@ ON CONFLICT (src, id) DO UPDATE SET
     total_laps = excluded.total_laps,
     joined_part_way = excluded.joined_part_way,
     first_seq = excluded.first_seq,
-    started_fuel_at_start = excluded.started_fuel_at_start`,
+    started_fuel_at_start = excluded.started_fuel_at_start,
+    car_name = COALESCE(sessions.car_name, excluded.car_name)`,
 		src, ev.GetSessionId(), ev.GetStartedAt().AsTime().UTC(),
 		enumName(ev.GetSessionType().String(), "SESSION_TYPE_"), ev.GetCarCode(),
 		optional(ev.TotalLaps), ev.GetJoinedPartWay(), int64(ev.GetFirstSeq()),
-		fuelAtStart(ev))
+		fuelAtStart(ev), textOrNull(ev.GetCarName()))
 	if err != nil {
 		return fmt.Errorf("store: start session %s/%s: %w", src, ev.GetSessionId(), err)
 	}
@@ -142,6 +143,10 @@ func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.Session
 	}
 	summary := ev.GetSummary()
 	ended := endedFields(ev)
+	kept, err := summaryFields(summary)
+	if err != nil {
+		return fmt.Errorf("store: end session %s/%s: %w", src, ev.GetSessionId(), err)
+	}
 	tx, err := s.index.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -164,12 +169,18 @@ UPDATE sessions SET
     last_seq = ?,
     ended_fuel_used = ?,
     ended_final_position = ?,
-    session_kind = ?
+    session_kind = ?,
+    summary = ?,
+    car_name = COALESCE(?, car_name),
+    track_id = ?,
+    track_name = ?,
+    track_sure = ?
 WHERE src = ? AND id = ? AND ended_at IS NULL`,
 		endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
 		summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
 		optional(summary.FinishingPosition), src, ev.GetSessionId(),
 		ended[0], ended[1], ended[2], ended[3],
+		kept[0], kept[1], kept[2], kept[3], kept[4],
 		src, ev.GetSessionId())
 	if err != nil {
 		return fmt.Errorf("store: end session %s/%s: %w", src, ev.GetSessionId(), err)
@@ -305,8 +316,8 @@ func (s *Store) writeLapRow(ctx context.Context, src string, lap *eventsv1.LapCo
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO laps (src, session_id, lap, lap_time_ms, complete, fuel_start, fuel_end, fuel_used,
     position, first_seq, last_seq, frames, top_speed_kph, min_speed_kph, path_m, max_jump_m,
-    file, recorded_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    file, recorded_at, pit_role, counts_for_best)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (src, session_id, lap) DO UPDATE SET
     lap_time_ms = excluded.lap_time_ms,
     complete = excluded.complete,
@@ -321,12 +332,14 @@ ON CONFLICT (src, session_id, lap) DO UPDATE SET
     min_speed_kph = excluded.min_speed_kph,
     path_m = excluded.path_m,
     max_jump_m = excluded.max_jump_m,
-    file = excluded.file`,
+    file = excluded.file,
+    pit_role = excluded.pit_role,
+    counts_for_best = excluded.counts_for_best`,
 		src, lap.GetSessionId(), lap.GetLap(), lapTime, lap.GetComplete(),
 		lap.GetFuelAtStart(), lap.GetFuelAtEnd(), lap.GetFuelUsed(),
 		optional(lap.Position), int64(lap.GetFirstSeq()), int64(lap.GetLastSeq()), len(frames),
 		floatOrNull(facts.topSpeedKph), floatOrNull(facts.minSpeedKph), facts.pathM, facts.maxJumpM,
-		file, s.now().UTC())
+		file, s.now().UTC(), pitRole(lap), countsForBest(lap))
 	if err != nil {
 		return err
 	}

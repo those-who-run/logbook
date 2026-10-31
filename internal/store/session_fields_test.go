@@ -145,8 +145,8 @@ func TestAV013DataDirectoryUpgradesInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	const (
-		sessions = `SELECT * EXCLUDE (` + newColumns + `) FROM sessions ORDER BY src, id`
-		laps     = `SELECT * FROM laps ORDER BY src, session_id, lap`
+		sessions = `SELECT * EXCLUDE (` + newColumns + `, ` + schema5Sessions + `) FROM sessions ORDER BY src, id`
+		laps     = `SELECT * EXCLUDE (` + schema5Laps + `) FROM laps ORDER BY src, session_id, lap`
 		version  = `SELECT version FROM schema_version`
 	)
 	var before struct{ sessions, laps [][]string }
@@ -155,7 +155,7 @@ func TestAV013DataDirectoryUpgradesInPlace(t *testing.T) {
 			t.Fatalf("the fixture is at schema version %s, want 2 (v0.1.3's)", got[0][0])
 		}
 		before.sessions = rowsOf(t, t.Context(), db, `SELECT * FROM sessions ORDER BY src, id`)
-		before.laps = rowsOf(t, t.Context(), db, laps)
+		before.laps = rowsOf(t, t.Context(), db, `SELECT * FROM laps ORDER BY src, session_id, lap`)
 	})
 	if len(before.sessions) == 0 || len(before.laps) == 0 {
 		t.Fatalf("the fixture holds %d sessions and %d laps", len(before.sessions), len(before.laps))
