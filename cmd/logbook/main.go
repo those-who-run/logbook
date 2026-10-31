@@ -1,9 +1,10 @@
 // Command logbook is the store for Those Who Run v2. `logbook run --data DIR`
-// consumes frames and events from NATS into the store and serves GET /healthz
-// until it gets SIGINT or SIGTERM; `logbook export --data DIR --laps` prints the
-// stored laps as JSON lines; `logbook backfill --data DIR` fills the columns of
-// schema 5 from EVENTS; `logbook -version` prints its version. With no
-// command it runs the template's example service, which serves GET /healthz.
+// consumes frames and events from NATS into the store, answers the store's
+// services (svc.logbook.*) and serves GET /healthz until it gets SIGINT or
+// SIGTERM; `logbook export --data DIR --laps` prints the stored laps as JSON
+// lines; `logbook backfill --data DIR` fills the columns of schema 5 from EVENTS;
+// `logbook -version` prints its version. With no command it runs the template's
+// example service, which serves GET /healthz.
 package main
 
 import (
@@ -15,6 +16,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	// The time zones, in the binary: the session list's days are in the viewer's
+	// zone (paddock#122), and the image has no zoneinfo to rely on.
+	_ "time/tzdata"
 
 	"github.com/those-who-run/logbook/internal/service"
 )

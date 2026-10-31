@@ -104,6 +104,7 @@ func (s *Store) MarkPosted(ctx context.Context, src string, ev *eventsv1.CardPos
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, ev.GetSessionId()); err != nil {
 		return err
 	}
@@ -133,6 +134,7 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
 WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
 		append(kept, src, ev.GetSessionId())...))
@@ -146,6 +148,7 @@ WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
 func (s *Store) FillFromSummaries(ctx context.Context) (n int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	rows, err := s.index.QueryContext(ctx, `
 SELECT src, id, summary::VARCHAR FROM sessions WHERE summary IS NOT NULL AND paused_ms IS NULL`)
 	if err != nil {
@@ -185,6 +188,7 @@ func (s *Store) BackfillLap(ctx context.Context, src string, lap *eventsv1.LapCo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE laps SET pit_role = ?, counts_for_best = ?
 WHERE src = ? AND session_id = ? AND lap = ? AND pit_role IS NULL`,
@@ -203,6 +207,7 @@ func (s *Store) BackfillPosted(ctx context.Context, src string, ev *eventsv1.Car
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET posted_at = ? WHERE src = ? AND id = ? AND posted_at IS NULL`,
 		ev.GetPostedAt().AsTime().UTC(), src, ev.GetSessionId()))

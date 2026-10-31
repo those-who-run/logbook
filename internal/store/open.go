@@ -49,6 +49,7 @@ func (s *Store) ApplyFact(ctx context.Context, src string, ev proto.Message, seq
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, id); err != nil {
 		return false, err
 	}
@@ -262,6 +263,7 @@ func (s *Store) BackfillStarted(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET joined_on_lap = COALESCE(joined_on_lap, ?), fuel_capacity = COALESCE(fuel_capacity, ?)
 WHERE src = ? AND id = ? AND ((joined_on_lap IS NULL AND ?::INTEGER IS NOT NULL)

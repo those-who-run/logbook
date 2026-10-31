@@ -29,6 +29,7 @@ func (s *Store) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) e
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	_, err := s.index.ExecContext(ctx, `
 INSERT INTO sessions (src, id, started_at, type, car_code, total_laps, joined_part_way, first_seq,
     started_fuel_at_start, car_name, joined_on_lap, fuel_capacity)
@@ -68,6 +69,7 @@ func (s *Store) WriteLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, lap.GetSessionId()); err != nil {
 		return err
 	}
@@ -147,6 +149,7 @@ func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.Session
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, ev.GetSessionId()); err != nil {
 		return err
 	}

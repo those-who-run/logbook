@@ -313,6 +313,57 @@ DuckDB needs cgo: the image is built with `CGO_ENABLED=1` and runs from
 distroless's `cc` image, which carries glibc and libstdc++. Building or testing
 on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
 
+## The services
+
+While it runs, `logbook` answers the store's reads as NATS micro endpoints of
+the service `logbook` (paddock#122 and #123), on the subjects contracts'
+`subjects.yaml` lists, each with its request and response names in its
+endpoint metadata. Each request and reply is a `twr.store.v1` message in
+protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
+
+| Subject | Answers |
+|---|---|
+| `svc.logbook.sessions.list` | the sessions of the sources asked for, newest first, filtered by track, car, kind and days in a time zone, with each filter's values counted under the other filters, `total` and `matched` |
+| `svc.logbook.sessions.get` | one session, from the first of the sources that has it |
+| `svc.logbook.laps.list` | a session's laps by number, with the session |
+| `svc.logbook.laps.trace` | one lap's trace, v1's `lap_trace` query run as it is on the lap's file |
+| `svc.logbook.sessions.same_track` | the other sessions at the session's track, where the detector was sure of both (`track_sure`) |
+
+- **Dumb.** A session is its row: the summary its end carried, laps left out;
+  for a session still open, or ended before schema 5 and not yet backfilled,
+  what its events have said so far (schema 6): `session.started`'s fields,
+  the last `session.kind` and `session.track`, the last `lap.best`, the time
+  paused, each continue's gap and each pit stop, and its complete laps. The
+  kind and the track are the last events' own, whole. A lap is its `lap.completed` with the frames
+  logbook counted and their top speed. logbook works out no flag: the reader
+  does.
+- **In the query.** The filters, counts and pages run in DuckDB, so a reply
+  holds only what was asked for. A page is 200 sessions when `limit` is 0, and
+  more than 500 is refused. The track filter keys on the track's label as the
+  card and the pit wall show it (`track_label`, contracts' `format.TrackLabel`):
+  the layout's name when the detector was sure of it, else the circuit's; a
+  track it cannot name at all has the empty name. Same-track matches sure
+  tracks only.
+- **Never blocking.** Reads run on connections of their own, each in a
+  snapshot, so a slow read never holds up a lap being written.
+- **Data versions.** The sessions and laps answers carry one for the whole
+  store, which changes with every write, and on a restart. A trace carries its
+  lap's own, from its row (`recorded_at`, `frames`, `first_seq`, `last_seq`),
+  so another lap's write leaves it (#123 R7). A request that carries the
+  current one as `known_data_version` is answered `unchanged`, with nothing
+  else.
+- **Under 1 MiB.** A list stops adding sessions once its JSON nears 900 KiB,
+  short of NATS's payload limit; the contract answers "at most limit", and the
+  caller pages on from `offset` plus what it got. A reply the server still
+  refuses is answered 500, never left to time out.
+- **Errors** are NATS micro's error headers: 400 for a bad request (no
+  sources, a page over 500, a day or time zone that cannot be read, points
+  over 10,000), 404 for a session, lap or lap file the sources do not have
+  (never an empty trace), 500 for logbook's own failure. An empty store
+  answers an empty list.
+- **Traces** equal v1 1.0.0's for the same lap file, value for value:
+  `testdata/traces/` holds v1's, made by `testdata/traces/v1_lap_trace.py`.
+
 ## Checks
 
 `make check` runs what CI runs; [`AGENTS.md`](AGENTS.md) says what that is and

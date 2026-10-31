@@ -21,7 +21,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -65,9 +67,20 @@ type Store struct {
 	index       *sql.DB
 	scratchConn *duckdb.Connector
 	scratch     *sql.DB
-	now         func() time.Time
+	// reader is the index again, through connections of its own, for the
+	// services' reads (read.go): DuckDB gives each its snapshot, so a slow read
+	// never holds up a write, nor a write a read (paddock#122 R6).
+	reader *sql.DB
+	now    func() time.Time
 
 	mu sync.Mutex
+	// rmu is held for reading by every read on reader, and for writing by Close,
+	// so the databases are never closed under a read in progress.
+	rmu sync.RWMutex
+	// epoch and writes make the data version (DataVersion): epoch is when this
+	// store was opened, and writes counts the writes since.
+	epoch  string
+	writes atomic.Uint64
 }
 
 // Open takes the data directory dir, creating it if it does not exist: it locks
@@ -81,7 +94,7 @@ func Open(ctx context.Context, dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, lock: lock, now: time.Now}
+	s := &Store{dir: dir, lock: lock, now: time.Now, epoch: strconv.FormatInt(time.Now().UnixNano(), 36)}
 	if err := s.open(ctx); err != nil {
 		return nil, errors.Join(err, s.Close())
 	}
@@ -105,6 +118,8 @@ func (s *Store) open(ctx context.Context) error {
 	if err := migrate(ctx, s.index); err != nil {
 		return err
 	}
+	s.reader = sql.OpenDB(s.indexConn)
+	s.reader.SetMaxOpenConns(readers)
 	if _, err := s.scratch.ExecContext(ctx, createFramesTable); err != nil {
 		return fmt.Errorf("store: the scratch table: %w", err)
 	}
@@ -131,6 +146,8 @@ func takeLock(path string) (*os.File, error) {
 // Close closes the databases and releases the lock. It is safe to call once on a
 // store Open returned; it returns the first error, after closing everything.
 func (s *Store) Close() error {
+	s.rmu.Lock()
+	defer s.rmu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// The databases before their connectors, and the lock last, so nothing is
@@ -142,6 +159,9 @@ func (s *Store) Close() error {
 	if s.scratchConn != nil {
 		errs = append(errs, s.scratchConn.Close())
 	}
+	if s.reader != nil {
+		errs = append(errs, s.reader.Close())
+	}
 	if s.index != nil {
 		errs = append(errs, s.index.Close())
 	}
@@ -151,7 +171,7 @@ func (s *Store) Close() error {
 	if s.lock != nil {
 		errs = append(errs, s.lock.Close())
 	}
-	s.scratch, s.scratchConn, s.index, s.indexConn, s.lock = nil, nil, nil, nil, nil
+	s.scratch, s.scratchConn, s.reader, s.index, s.indexConn, s.lock = nil, nil, nil, nil, nil, nil
 	return errors.Join(errs...)
 }
 
