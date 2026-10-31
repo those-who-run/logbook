@@ -188,9 +188,11 @@ func importSession(ctx context.Context, db *sql.DB, from, id string, st Store) (
 		return out, nil
 	}
 	var (
-		frames  []v1Frame
-		lapEnds []int // the index in frames after each of v1.Laps' files
+		rec     bytes.Buffer // the session's frames as a v1 recording, lap file by lap file
+		n       int
+		lapEnds []int // the frame count after each of v1.Laps' files
 		missing []string
+		facts   = factsOf(v1)
 	)
 	for _, l := range v1.Laps {
 		path := filepath.Join(from, v1Sessions, id, filepath.Base(l.File))
@@ -203,15 +205,21 @@ func importSession(ctx context.Context, db *sql.DB, from, id string, st Store) (
 			out.Outcome, out.Reason = Failed, fmt.Sprintf("%s: %v", l.File, err)
 			return out, nil
 		}
-		frames = append(frames, f...)
-		lapEnds = append(lapEnds, len(frames))
+		// Each file's rows become recording lines at once, so a long session is
+		// never held as rows whole.
+		if err := recordingOf(&rec, f, facts); err != nil {
+			out.Outcome, out.Reason = Failed, fmt.Sprintf("%s: %v", l.File, err)
+			return out, nil
+		}
+		n += len(f)
+		lapEnds = append(lapEnds, n)
 		for _, c := range lacking {
 			if !contains(missing, c) {
 				missing = append(missing, c)
 			}
 		}
 	}
-	d, err := derive(frames, v1, id)
+	d, err := derive(rec.Bytes(), v1, id)
 	if err != nil {
 		out.Outcome, out.Reason = Failed, err.Error()
 		return out, nil
@@ -256,14 +264,10 @@ type derived struct {
 	endedAt   time.Time
 }
 
-// derive runs a v1 session's frames through salsa's v1 mapping and ecu's race
+// derive runs a v1 session's frames, as recording lines, through salsa's v1 mapping and ecu's race
 // state, as `ecu replay` does at --speed max: each frame dated v1's start plus its
 // time since the first, the open session ended as the input ends.
-func derive(frames []v1Frame, v1 *v1SessionSummary, id string) (*derived, error) {
-	rec, err := recordingOf(frames, factsOf(v1))
-	if err != nil {
-		return nil, err
-	}
+func derive(rec []byte, v1 *v1SessionSummary, id string) (*derived, error) {
 	src, err := salsa.NewRecording(bytes.NewReader(rec), id)
 	if err != nil {
 		return nil, err
@@ -383,7 +387,7 @@ func writeDerived(ctx context.Context, st Store, d *derived) error {
 		return err
 	}
 	for _, l := range d.laps {
-		if err := st.WriteLap(ctx, store.SourceV1Import, l, d.frames); err != nil {
+		if err := st.WriteLap(ctx, store.SourceV1Import, l, lapFrames(d.frames, l)); err != nil {
 			return err
 		}
 	}
@@ -391,4 +395,20 @@ func writeDerived(ctx context.Context, st Store, d *derived) error {
 		return err
 	}
 	return st.MarkImported(ctx, d.started.GetSessionId(), false)
+}
+
+// lapFrames is the part of a session's frames, ecu's, one per packet with seq
+// counting from 1, that lap's file is written from: its seq range and the frame
+// before it, which says whether a finished frame closes a race. WriteLap picks
+// the lap's racing frames out of what it is given, so a long session is not
+// sorted whole for every lap.
+func lapFrames(frames []*telemetryv1.Frame, lap *eventsv1.LapCompleted) []*telemetryv1.Frame {
+	lo, hi := int(lap.GetFirstSeq())-2, int(lap.GetLastSeq())
+	if lo < 0 {
+		lo = 0
+	}
+	if hi > len(frames) || lo >= hi || frames[lo].GetSeq() != uint32(lo+1) || frames[hi-1].GetSeq() != uint32(hi) { //nolint:gosec // indexes of a slice
+		return frames
+	}
+	return frames[lo:hi]
 }

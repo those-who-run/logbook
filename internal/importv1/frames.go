@@ -76,11 +76,11 @@ func (f sessionFacts) gameTimes(lap int32) (last, best int32) {
 	return last, best
 }
 
-// recordingOf is v1's lap frames as a v1 recording, one RaceState.to_dict line
-// each (format version 2), made whole with facts, for salsa.NewRecording.
-func recordingOf(frames []v1Frame, facts sessionFacts) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
+// recordingOf writes v1's lap frames to buf as a v1 recording, one
+// RaceState.to_dict line each (format version 2), made whole with facts, for
+// salsa.NewRecording.
+func recordingOf(buf *bytes.Buffer, frames []v1Frame, facts sessionFacts) error {
+	enc := json.NewEncoder(buf)
 	for i, f := range frames {
 		lap := int32(num(f["lap"]))
 		last, best := facts.gameTimes(lap)
@@ -135,13 +135,13 @@ func recordingOf(frames []v1Frame, facts sessionFacts) ([]byte, error) {
 			"time_of_day_ms":    int64(num(f["time_of_day_ms"])),
 		}
 		if _, ok := line["phase"].(string); !ok {
-			return nil, fmt.Errorf("frame %d: no phase", i+1)
+			return fmt.Errorf("frame %d: no phase", i+1)
 		}
 		if err := enc.Encode(line); err != nil {
-			return nil, fmt.Errorf("frame %d: %w", i+1, err)
+			return fmt.Errorf("frame %d: %w", i+1, err)
 		}
 	}
-	return buf.Bytes(), nil
+	return nil
 }
 
 // wheels is the four wheels' values of a column pattern, fl, fr, rl, rr.

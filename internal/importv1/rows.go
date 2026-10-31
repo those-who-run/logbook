@@ -215,7 +215,7 @@ func writeRows(ctx context.Context, st Store, v1 *v1SessionSummary, frames []*te
 		return err
 	}
 	for _, l := range laps {
-		if err := st.WriteLap(ctx, store.SourceV1Import, l, frames); err != nil {
+		if err := st.WriteLap(ctx, store.SourceV1Import, l, lapFrames(frames, l)); err != nil {
 			return err
 		}
 	}

@@ -138,8 +138,8 @@ func TestImportGivesOneSessionEqualToV1sRows(t *testing.T) {
 		if lap.GetPitRole() != role {
 			t.Errorf("lap %d: pit role %v, v1's %v", lap.GetLap(), lap.GetPitRole(), role)
 		}
-		if laps[i].GetFrames() == 0 {
-			t.Errorf("lap %d: no frames stored", lap.GetLap())
+		if int(laps[i].GetFrames()) != want.Frames {
+			t.Errorf("lap %d: %d frames stored, v1 kept %d", lap.GetLap(), laps[i].GetFrames(), want.Frames)
 		}
 	}
 }
