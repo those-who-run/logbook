@@ -428,11 +428,11 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 			// other events the contract names are not stored yet, so their fields are
 			// absent.
 			//
-			// TODO(paddock#122): fill the rest from the columns migration 5 is gaining
-			// on main (joined_on_lap, fuel_capacity, best_lap with best_lap_ms,
-			// paused_ms, gaps and pit_stops as JSON, and the track_* and
-			// session_kind columns the TrackChanged and KindChanged writers keep),
-			// once that PR merges and is merged in here.
+			// TODO(paddock#122): fill the rest from schema 6's columns (migration 6,
+			// in its own PR on main): joined_on_lap, fuel_capacity, best_lap with
+			// best_lap_ms, paused_ms, gaps and pit_stops as JSON, and the track_*,
+			// session_kind and total_laps columns its event writers keep. This PR
+			// fills them once that one merges and is merged in here.
 			r.Summary = &eventsv1.SessionSummary{
 				StartedAt:     timestamppb.New(startedAt.UTC()),
 				SessionType:   eventsv1.SessionType(enumValue(eventsv1.SessionType_value, "SESSION_TYPE_", typ.String)),

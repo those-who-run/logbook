@@ -5,15 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
+	telemetryv1 "github.com/those-who-run/contracts/gen/go/twr/telemetry/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // v1Trace is one of v1's lap traces, as testdata/traces/v1_lap_trace.py saved it
@@ -226,4 +231,47 @@ func TestATraceVersionIsItsLaps(t *testing.T) {
 	if !got.GetUnchanged() || got.GetTrace() != nil || got.GetDataVersion() != now {
 		t.Errorf("with its current version: %v", got)
 	}
+}
+
+// A trace at the contract's most points fits NATS's 1 MiB payload with room to
+// spare, on a lap built for the longest values: every one of its 10,000 frames
+// kept, each channel a float32's full double digits, times past 10,000 s and
+// positions near ±10 km. About 75 bytes a point: thinning keeps at most the
+// points asked for plus two a jump, and a lap would need thousands of jumps to
+// reach 1 MiB.
+func TestATraceAtTheMostPointsFits(t *testing.T) {
+	s := open(t, t.TempDir())
+	const n = MaxPoints
+	rng := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // test values, not secrets
+	frames := make([]*telemetryv1.Frame, n)
+	for i := range frames {
+		a := 2 * math.Pi * float64(i) / n
+		frames[i] = &telemetryv1.Frame{
+			Seq: uint32(i + 1), T: 12345.678 + float64(i)/60, Lap: 1, Phase: telemetryv1.Phase_PHASE_IN_RACE, //nolint:gosec // 10,000 frames
+			PosX: float64(float32(-9876.543 * math.Cos(a))), PosZ: float64(float32(-9876.543 * math.Sin(a))),
+			SpeedKph: float64(float32(rng.Float64() * 333.3)), EngineRpm: float64(float32(1000 + rng.Float64()*8999)),
+			Gear: int32(1 + rng.IntN(8)), Throttle: int32(rng.IntN(256)), Brake: int32(rng.IntN(256)), //nolint:gosec // small
+		}
+	}
+	started := &eventsv1.SessionStarted{SessionId: sid, Source: SourceLive, SessionType: eventsv1.SessionType_SESSION_TYPE_RACE,
+		FirstSeq: 1, StartedAt: timestamppb.New(time.Date(2026, 10, 31, 20, 0, 0, 0, time.UTC))}
+	if err := s.StartSession(t.Context(), started); err != nil {
+		t.Fatal(err)
+	}
+	lap := &eventsv1.LapCompleted{SessionId: sid, Lap: 1, Complete: true, LapTimeMs: 480_000, FirstSeq: 1, LastSeq: n}
+	if err := s.WriteLap(t.Context(), SourceLive, lap, frames); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTrace(t.Context(), &storev1.GetTraceRequest{Sources: live, SessionId: sid, Lap: 1, Points: MaxPoints})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := protojson.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept := len(got.GetTrace().GetT()); kept != n || len(b) > replyBudget {
+		t.Errorf("%d points kept in %d bytes, want all %d within %d", kept, len(b), n, replyBudget)
+	}
+	t.Logf("%d points: %d bytes of JSON", len(got.GetTrace().GetT()), len(b))
 }
