@@ -335,9 +335,10 @@ func TestAnOpenSessionKeepsItsFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	const q = `SELECT joined_on_lap, fuel_capacity, session_kind, total_laps, track_id, track_name, track_sure,
-    best_lap, best_lap_ms, paused_ms, pit_stops::VARCHAR FROM sessions`
+    best_lap, best_lap_ms, paused_ms, pit_stops::VARCHAR, track_label, kind IS NOT NULL, track IS NOT NULL,
+    track_seq < best_seq FROM sessions`
 	want := [][]string{{"1", "100", "lap_race", "3", "350", "Suzuka Circuit", "true", "1", "98100", "2500",
-		`[{"stop":1,"inLap":1}]`}}
+		`[{"stop":1,"inLap":1}]`, "Suzuka Circuit", "true", "true", "true"}}
 	if got := indexRows(t, dir, q); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("%q,\nwant %q", got, want)
 	}
@@ -354,7 +355,10 @@ func TestAnOpenSessionKeepsItsFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The start, its laps, the 6 facts and the one of a session never started.
-	if wantN := (BackfillCounts{Read: 1 + len(msgs.laps) + 7, Facts: 6}); got != wantN {
+	// The kind, track and best lap come at the sequences that already set them,
+	// so they change nothing; the pause, resume and stop are applied again to the
+	// same end.
+	if wantN := (BackfillCounts{Read: 1 + len(msgs.laps) + 7, Facts: 3}); got != wantN {
 		t.Errorf("backfill %+v, want %+v", got, wantN)
 	}
 	if got := indexRows(t, dir, q); !slices.EqualFunc(got, want, slices.Equal) {

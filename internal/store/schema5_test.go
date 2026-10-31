@@ -21,8 +21,11 @@ const (
 	schema5Laps     = `pit_role, counts_for_best`
 	// schema5Open are the columns an open session's events fill (paddock#337).
 	schema5Open = `joined_on_lap, fuel_capacity, best_lap, paused_ms, gaps, pit_stops`
+	// schema6More are migration 6's other columns: the kind and track whole, and
+	// the sequences.
+	schema6More = `kind, track, track_label, kind_seq, track_seq, best_seq`
 	// schema5All is every sessions column migration 5 adds.
-	schema5All = schema5Sessions + `, ` + schema5Open
+	schema5All = schema5Sessions + `, ` + schema5Open + `, ` + schema6More
 )
 
 // withSummary gives sess the summary ecu sends from contracts v0.2: a car, a
@@ -176,7 +179,8 @@ func before5(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.index.ExecContext(t.Context(), `
 UPDATE sessions SET summary = NULL, car_name = NULL, track_id = NULL, track_name = NULL, track_sure = NULL, posted_at = NULL,
-    joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL;
+    joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL,
+    kind = NULL, track = NULL, track_label = NULL, kind_seq = NULL, track_seq = NULL, best_seq = NULL;
 UPDATE laps SET pit_role = NULL, counts_for_best = NULL`); err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +304,7 @@ VALUES ('live', 's', 1, 98000, true, 50, 49, 1, 1, 600, 600, 5000, 2, 'f', '2026
 				t.Errorf("start %d: laps %q, want %q", start+1, got, before[1])
 			}
 			got := rowsOf(t, ctx, db, `SELECT `+schema5All+`, l.pit_role, l.counts_for_best FROM sessions s JOIN laps l ON l.session_id = s.id`)
-			if want := [][]string{slices.Repeat([]string{"NULL"}, 14)}; !slices.EqualFunc(got, want, slices.Equal) {
+			if want := [][]string{slices.Repeat([]string{"NULL"}, 20)}; !slices.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("start %d: new columns %q, want NULL", start+1, got)
 			}
 		})

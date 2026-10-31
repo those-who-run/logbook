@@ -112,9 +112,14 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   event while the session is open, and the end's summary replaces it:
   - `joined_on_lap` and `fuel_capacity` from `session.started` (a capacity of
     0, unset, is null);
-  - `track_id`, `track_name` and `track_sure` from the last `session.track`,
-    or a `session.continued`'s carried track while the session has none;
-  - `session_kind` and `total_laps` from the last `session.kind`'s kind;
+  - `track` (`JSON`, the `TrackVerdict` whole) from the last `session.track`,
+    or a `session.continued`'s carried track while the session has none
+    (`track` null), with `track_id`, `track_name` and `track_sure` beside it
+    for the filters, and `track_label`, the verdict's label as contracts'
+    `format.TrackLabel` writes it (the name when sure, else the circuit's
+    family, else `Unknown track`), which the track filter keys on;
+  - `kind` (`JSON`, the `SessionKind` whole) from the last `session.kind`,
+    with `session_kind` and `total_laps` from it;
   - `best_lap` and `best_lap_ms` from the last `lap.best`. Once ecu has named
     a best lap, a lap written later no longer works `best_lap_ms` out from the
     laps;
@@ -124,9 +129,14 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
     gap, and `pit_stops` (`JSON`, an array of `PitStop`) from each
     `pit.exited`'s stop, a stop of the same number taking its copy's place.
 
+  The track, the kind and the best lap are the last event's: `track_seq`,
+  `kind_seq` and `best_seq` keep the `EVENTS` sequence of the event that set
+  each, and an event of a lower sequence, an older one delivered again after a
+  newer, changes nothing.
+
   At the end, `joined_on_lap` and `fuel_capacity` take the summary's where it
-  has them, and `best_lap`, `paused_ms`, `gaps` and `pit_stops` are the
-  summary's (`gaps` and `pit_stops` null when it lists none). Each is null in
+  has them, and `best_lap`, `paused_ms`, `gaps`, `pit_stops`, `kind`, `track`
+  and `track_label` are the summary's (`gaps` and `pit_stops` null when it lists none). Each is null in
   a row written before schema 6 until the backfill fills it.
 - **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
   `seq` range that are in race, and the finished frame that closes a race. Each
