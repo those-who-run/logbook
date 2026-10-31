@@ -366,7 +366,7 @@ func TestWhatItCannotUseIsDropped(t *testing.T) {
 		{subject: "twr.v1.live.evt." + sidB + ".lap.completed", id: sidB + ":lap.completed:1", at: at,
 			msg: &eventsv1.LapCompleted{SessionId: sidB, Lap: 1, LastSeq: 5}},
 		{subject: "twr.v1.live.evt." + sidB + ".session.ended", id: sidB + ":session.ended:1", at: at,
-			msg: &eventsv1.SessionEnded{SessionId: sidB}},
+			msg: &eventsv1.SessionEnded{SessionId: sidB, Summary: &eventsv1.SessionSummary{}}},
 		{subject: "twr.v1.live.evt." + sidB + ".lap.completed", id: sidB + ":lap.completed:0", at: at,
 			msg: &eventsv1.LapCompleted{SessionId: sidB, Lap: 0}},
 		{subject: "twr.v1.live.evt.not-a-ulid.session.started", id: "x:session.started:1", at: at,

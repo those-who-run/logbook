@@ -46,7 +46,21 @@ type BackfillCounts struct {
 // or lap and a second run changes nothing. An event that cannot be read is
 // skipped with a warning.
 func Backfill(ctx context.Context, natsURL string, st backfillStore, logger *slog.Logger) (BackfillCounts, error) {
+	return backfill(ctx, natsURL, st, logger, nil)
+}
+
+// backfillTimeout bounds a whole backfill: 30 days of events are a few thousand
+// messages, read in seconds, so a backfill still going after it is stuck.
+const backfillTimeout = 10 * time.Minute
+
+// backfill is Backfill, with wrap, when it is set, standing in front of the
+// consumer: the tests make its fetches come back empty.
+func backfill(ctx context.Context, natsURL string, st backfillStore, logger *slog.Logger,
+	wrap func(jetstream.Consumer) jetstream.Consumer,
+) (BackfillCounts, error) {
 	var n BackfillCounts
+	ctx, cancel := context.WithTimeout(ctx, backfillTimeout)
+	defer cancel()
 	nc, err := nats.Connect(natsURL, nats.Name("logbook backfill"))
 	if err != nil {
 		return n, fmt.Errorf("nats %s: %w", natsURL, err)
@@ -78,47 +92,66 @@ func Backfill(ctx context.Context, natsURL string, st backfillStore, logger *slo
 			_ = js.DeleteConsumer(context.WithoutCancel(ctx), eventsStream, info.Name)
 		}
 	}()
-	if err := readBack(ctx, oc, last, st, logger, &n); err != nil {
-		return n, err
+	cons := oc
+	if wrap != nil {
+		cons = wrap(cons)
 	}
-	logger.InfoContext(ctx, "backfill done", "read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards)
+	read, err := readBack(ctx, cons, last, st, logger, &n)
+	if err != nil {
+		return n, fmt.Errorf("backfill stopped after stream sequence %d of %d: %w", read, last, err)
+	}
+	logger.InfoContext(ctx, "backfill done", "last", last, "last_read", read,
+		"read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards)
 	return n, nil
 }
 
 // readBack hands each event the consumer delivers to the store, up to stream
-// sequence last, or until a fetch finds none left.
+// sequence last, and returns the stream sequence of the last event it read. An
+// empty fetch ends it only once the server says none of the three is left
+// (NumPending 0): on a loaded host a fetch can time out with events still to come.
 func readBack(ctx context.Context, oc jetstream.Consumer, last uint64, st backfillStore, logger *slog.Logger,
 	n *BackfillCounts,
-) error {
+) (uint64, error) {
+	var read uint64
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return read, err
 		}
 		msgs, err := fetch(oc, eventsBatch, time.Second)
 		if err != nil {
-			return err
+			return read, err
 		}
 		if len(msgs) == 0 {
-			return nil // nothing of the three after the last read
+			info, err := oc.Info(ctx)
+			if err != nil {
+				return read, err
+			}
+			if info.NumPending == 0 {
+				return read, nil // nothing of the three after the last read
+			}
+			logger.InfoContext(ctx, "backfill: a fetch came back empty with events pending; fetching again",
+				"pending", info.NumPending, "last_read", read)
+			continue
 		}
 		for _, m := range msgs {
 			md, err := m.Metadata()
 			if err != nil {
-				return err
+				return read, err
 			}
 			if md.Sequence.Stream > last {
-				return nil
+				return read, nil
 			}
+			read = md.Sequence.Stream
 			n.Read++
 			if err := backfillOne(ctx, st, m, n); err != nil {
 				var bad badEvent
 				if !errors.As(err, &bad) {
-					return err
+					return read, err
 				}
 				logger.WarnContext(ctx, "backfill: event skipped", "subject", m.Subject(), "err", bad.error)
 			}
 			if md.Sequence.Stream == last {
-				return nil
+				return read, nil
 			}
 		}
 	}

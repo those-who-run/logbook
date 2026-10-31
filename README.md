@@ -126,7 +126,9 @@ logbook stored before it. It opens the store, which migrates it, reads
 `session.ended`, `lap.completed` and `card.posted` back from `EVENTS` with an
 ephemeral ordered consumer, from the stream's first message to its last when
 the backfill began, and sets each column only where it is still null, on rows
-the store already holds. It adds no session, lap or lap file and changes no
+the store already holds. A fetch that comes back empty ends it only once the
+server has none of the three pending, and it gives up, exiting 1, after
+10 min. It adds no session, lap or lap file and changes no
 other column, so it is safe to run again: a second run changes nothing. It
 logs `backfill done` with the events read and the sessions, laps and cards it
 filled. `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
@@ -135,17 +137,30 @@ events have aged out stays without them.
 
 On a cluster, with the StatefulSet of paddock's base:
 
-1. **Back up the index.** Stop logbook
-   (`kubectl -n <namespace> scale statefulset/logbook --replicas=0`, and wait
-   for the pod to go), then copy `index.duckdb`, and `index.duckdb.wal` if
-   there is one, out of the volume, keeping the copy off it.
+1. **Back up the index.**
+   - If the stack is deployed by Argo CD with self-heal on, turn self-heal off
+     for its application first, or it scales logbook straight back up:
+     `kubectl -n argocd patch application <app> --type merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'`.
+   - Stop logbook: `kubectl -n <namespace> scale statefulset/logbook --replicas=0`,
+     and wait for its pod to go
+     (`kubectl -n <namespace> wait --for=delete pod/logbook-0`).
+   - Copy `index.duckdb`, and `index.duckdb.wal` if there is one
+     (`index.duckdb*`), off the volume. The image is distroless, with no shell
+     or `tar`, and logbook is stopped, so copy from the volume itself: from
+     the storage's host directory (with a local-path provisioner, the
+     PersistentVolume's `spec.hostPath.path` or `spec.local.path`), or from a
+     pod of its own, such as busybox, that mounts the claim `data-logbook-0`
+     (`kubectl cp` from that pod).
 2. **Run the backfill** as a Job on the volume, with the release's image that
    brings schema 5 and the StatefulSet's user and environment, and the
    command `logbook backfill --data /data --nats nats://nats:4222`. It
-   migrates the index, then fills it.
-3. **Roll that release** and start logbook again (`--replicas=1`). A logbook
-   of the release before refuses the migrated index, so it must not start in
-   between.
+   migrates the index, then fills it. Its log ends with `backfill done`, which
+   names the stream's last sequence (`last`), the last it read (`last_read`)
+   and what it filled; a backfill that stops short exits 1 and says where.
+3. **Roll that release:** bump the image where the stack pins it (paddock's
+   base, then a hard refresh of the Argo CD application), scale logbook back
+   to 1, and turn self-heal on again. A logbook of the release before refuses
+   the migrated index, so it must not start in between.
 
 Rolling back needs the copy put back, as for any migration.
 

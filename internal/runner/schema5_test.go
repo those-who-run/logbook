@@ -11,6 +11,7 @@ import (
 
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/those-who-run/contracts/ce"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/proto"
@@ -82,7 +83,10 @@ func TestTheSubscriberKeepsTheSummaryPitRolesAndCard(t *testing.T) {
 	publish(t, js, []published{{subject: "twr.v1.live.evt." + sidB + ".card.posted", id: "live:" + sidB + ":card.posted:1",
 		at: postedAt, msg: &eventsv1.CardPosted{SessionId: sidB, PostedAt: timestamppb.New(postedAt)}}}, false)
 	in.logs.await(t, 1, "card of a session never started; dropped", map[string]any{"session": sidB})
-	// A card with no time, and one that cannot be read, are dropped.
+	// An end with no summary (ecu always sends one) is dropped, not applied: the
+	// session stays open. So are a card with no time, and one that cannot be read.
+	publish(t, js, []published{{subject: "twr.v1.live.evt." + sidA + ".session.ended", id: "live:" + sidA + ":session.ended:9",
+		at: postedAt, msg: &eventsv1.SessionEnded{SessionId: sidA}}}, false)
 	publish(t, js, []published{{subject: "twr.v1.live.evt." + sidA + ".card.posted", id: "live:" + sidA + ":card.posted:2",
 		at: postedAt, msg: &eventsv1.CardPosted{SessionId: sidA}}}, false)
 	h, _, err := ce.Encode(&eventsv1.CardPosted{}, ce.Event{ID: "broken", Source: "/twr/podium", Time: postedAt})
@@ -93,7 +97,10 @@ func TestTheSubscriberKeepsTheSummaryPitRolesAndCard(t *testing.T) {
 		Header: nats.Header(h), Data: []byte{0xff, 0xff}}); err != nil {
 		t.Fatal(err)
 	}
-	in.logs.await(t, 2, "event dropped", nil)
+	in.logs.await(t, 3, "event dropped", nil)
+	if n := len(in.logs.find("event dropped", map[string]any{"err": "no summary"})); n != 1 {
+		t.Errorf("%d ends dropped for no summary, want 1:\n%s", n, in.logs.String())
+	}
 	if err := in.stop(t); err != nil {
 		t.Fatal(err)
 	}
@@ -148,17 +155,7 @@ func TestTheBackfillFillsWhatWasStoredBefore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	conn, err := duckdb.NewConnector(filepath.Join(dir, "index.duckdb"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db := sql.OpenDB(conn)
-	_, err = db.ExecContext(t.Context(), `
-UPDATE sessions SET summary = NULL, car_name = NULL, track_id = NULL, track_name = NULL, track_sure = NULL, posted_at = NULL;
-UPDATE laps SET pit_role = NULL, counts_for_best = NULL`)
-	if err := errors.Join(err, db.Close(), conn.Close()); err != nil {
-		t.Fatal(err)
-	}
+	as015(t, dir)
 	before := takeSnapshot(t, dir)
 
 	for run, want := range []BackfillCounts{{Sessions: 1, Laps: 3, Cards: 1}, {}} {
@@ -215,5 +212,88 @@ func TestTheBackfillOfAnEmptyStream(t *testing.T) {
 	bare := startNATS(t, 0)
 	if _, err := Backfill(t.Context(), bare.ClientURL(), s, logger); err == nil {
 		t.Error("a server with no EVENTS stream did not fail the backfill")
+	}
+}
+
+// as015 empties the columns schema 5 added in dir's index, as logbook 0.1.5 left
+// them.
+func as015(t *testing.T, dir string) {
+	t.Helper()
+	conn, err := duckdb.NewConnector(filepath.Join(dir, "index.duckdb"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	_, err = db.ExecContext(t.Context(), `
+UPDATE sessions SET summary = NULL, car_name = NULL, track_id = NULL, track_name = NULL, track_sure = NULL, posted_at = NULL;
+UPDATE laps SET pit_role = NULL, counts_for_best = NULL`)
+	if err := errors.Join(err, db.Close(), conn.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// slowConsumer is a consumer whose first empty fetches come back with nothing,
+// as a fetch that times out on a loaded host does.
+type slowConsumer struct {
+	jetstream.Consumer
+	empty int
+}
+
+func (c *slowConsumer) Fetch(n int, opts ...jetstream.FetchOpt) (jetstream.MessageBatch, error) {
+	if c.empty > 0 {
+		c.empty--
+		return emptyBatch{}, nil
+	}
+	return c.Consumer.Fetch(n, opts...)
+}
+
+type emptyBatch struct{}
+
+func (emptyBatch) Messages() <-chan jetstream.Msg {
+	ch := make(chan jetstream.Msg)
+	close(ch)
+	return ch
+}
+
+func (emptyBatch) Error() error { return nil }
+
+// An empty fetch with events still pending does not end the backfill: it fetches
+// again until it has read them all.
+func TestTheBackfillGoesOnPastAnEmptyFetch(t *testing.T) {
+	srv, js := testServer(t)
+	dir := t.TempDir()
+	in := start(t, testConfig(srv.ClientURL(), dir))
+	publish(t, js, schema5Race("live", sidA).msgs, false)
+	in.logs.await(t, 1, "card posted", map[string]any{"session": sidA})
+	in.logs.await(t, 1, "session ended", map[string]any{"session": sidA})
+	if err := in.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	as015(t, dir)
+	s, err := store.Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := newLogs()
+	got, err := backfill(t.Context(), srv.ClientURL(), s, slog.New(slog.NewJSONHandler(logs, nil)),
+		func(c jetstream.Consumer) jetstream.Consumer { return &slowConsumer{Consumer: c, empty: 3} })
+	if cerr := s.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (BackfillCounts{Read: 5, Sessions: 1, Laps: 3, Cards: 1}); got != want {
+		t.Errorf("%+v, want %+v", got, want)
+	}
+	if n := len(logs.find("backfill: a fetch came back empty with events pending; fetching again", nil)); n != 3 {
+		t.Errorf("%d empty fetches logged, want 3:\n%s", n, logs.String())
+	}
+	done := logs.find("backfill done", nil)
+	if len(done) != 1 || done[0]["last"] != done[0]["last_read"] {
+		t.Errorf("done %v, want the last sequence read to be the stream's last", done)
+	}
+	if got := indexRows(t, dir, schema5Sessions); !slices.EqualFunc(got, wantSchema5Sessions, slices.Equal) {
+		t.Errorf("sessions %q, want %q", got, wantSchema5Sessions)
 	}
 }

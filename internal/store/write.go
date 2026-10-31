@@ -136,6 +136,9 @@ func (s *Store) EndSession(ctx context.Context, src string, ev *eventsv1.Session
 	if endedAt.IsZero() {
 		return fmt.Errorf("store: session %s has no end time", ev.GetSessionId())
 	}
+	if ev.GetSummary() == nil {
+		return fmt.Errorf("store: the end of session %s has no summary", ev.GetSessionId())
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.sessionExists(ctx, src, ev.GetSessionId()); err != nil {

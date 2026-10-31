@@ -793,8 +793,9 @@ func (c *consumer) continued(ctx context.Context, src string, ev *eventsv1.Sessi
 }
 
 func (c *consumer) ended(ctx context.Context, src string, ev *eventsv1.SessionEnded, at time.Time, m jetstream.Msg) error {
-	if err := store.CheckKey(src, ev.GetSessionId()); err != nil {
-		return c.drop(ctx, m, err)
+	// ecu always sends a summary; an end without one has nothing to apply.
+	if err := store.CheckKey(src, ev.GetSessionId()); err != nil || ev.GetSummary() == nil {
+		return c.drop(ctx, m, errors.Join(err, errIf(ev.GetSummary() == nil, "no summary")))
 	}
 	s, ok := c.open[[2]string{src, ev.GetSessionId()}]
 	if !ok {
