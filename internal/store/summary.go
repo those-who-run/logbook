@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"slices"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -109,10 +110,12 @@ UPDATE sessions SET posted_at = COALESCE(posted_at, ?) WHERE src = ? AND id = ?`
 }
 
 // BackfillSummary keeps ev's summary on a session stored before schema 5: its
-// summary and the columns taken from it (summarySet), only where summary is still NULL, so the
-// first end's summary stays and a second run changes nothing. It changes no other
-// column. It says whether the row changed; a session the index does not hold is
-// skipped.
+// summary and the columns taken from it (summarySet), only where summary is
+// still NULL, so the first end's summary stays. On a session that has its
+// summary but not schema 6's columns (ended under logbook 0.1.7), it fills those
+// from the summary, once: paused_ms, which an end always sets, says whether they
+// are there. A second run changes nothing. It changes no other column. It says
+// whether the row changed; a session the index does not hold is skipped.
 func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.SessionEnded) (bool, error) {
 	src = sourceOf(src)
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
@@ -124,9 +127,17 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
+	did, err := changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
 WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
-		append(kept, src, ev.GetSessionId())...))
+		append(slices.Clone(kept), src, ev.GetSessionId())...))
+	if err != nil || did {
+		return did, err
+	}
+	return changed(s.index.ExecContext(ctx, `
+UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
+    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?
+WHERE src = ? AND id = ? AND summary IS NOT NULL AND paused_ms IS NULL`,
+		kept[5], kept[6], kept[7], kept[8], kept[9], kept[10], src, ev.GetSessionId()))
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema

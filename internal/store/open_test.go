@@ -228,3 +228,27 @@ VALUES ('live', 's', '2026-10-31 20:00:00', 'lap_race', 3431, false, 1, 'Suzuka'
 		}
 	})
 }
+
+// A session that ended under logbook 0.1.7 has its summary but not schema 6's
+// columns: the backfill fills those from the summary, once.
+func TestTheBackfillFillsSchema6OnASessionEndedAt5(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race("live", sid)
+	sum := sess.ended.Summary
+	sum.FuelCapacity, sum.PausedMs = 90, 1500
+	sum.PitStops = []*eventsv1.PitStop{{Stop: 1, InLap: 2}}
+	sess.write(t, s)
+	if _, err := s.index.ExecContext(t.Context(), `UPDATE sessions SET `+
+		`joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	for run, want := range []bool{true, false} {
+		if did, err := s.BackfillSummary(t.Context(), "live", sess.ended); err != nil || did != want {
+			t.Errorf("run %d: %v, %v, want %v", run+1, did, err, want)
+		}
+	}
+	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5Open+` FROM sessions`)
+	if want := [][]string{{"NULL", "90", "1", "1500", "NULL", `[{"inLap":2,"stop":1}]`}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%q, want %q", got, want)
+	}
+}

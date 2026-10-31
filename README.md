@@ -150,7 +150,9 @@ an open session's events (`session.continued`, `session.kind`,
 `session.track`, `session.paused`, `session.resumed`, `lap.best` and
 `pit.exited`), back from `EVENTS` with an ephemeral ordered consumer, from the
 stream's first message to its last when the backfill began. It sets each
-column only where it is still null, on rows the store already holds; an open
+column only where it is still null, on rows the store already holds (a
+session that ended under schema 5 gets schema 6's columns from its stored
+summary's event); an open
 session's events it applies as the subscriber does, which changes nothing on
 a session that has ended. A fetch that comes back empty ends it only once the
 server has none of them pending, and it gives up, exiting 1, after 10 min.
