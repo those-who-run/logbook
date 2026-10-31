@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/those-who-run/contracts/format"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -345,17 +346,19 @@ func pageLimit(offset, limit int32) (int32, error) {
 }
 
 // sessionsOf is the sessions of sources as the CTE s, with the keys the filters
-// read: track_key is the track's name when the detector was sure of it and the
-// empty name otherwise, kind_key the type as stored (ecu's final verdict once the
+// read: track_key is the track's label as the card and the pit wall show it
+// (track_label, contracts' format.TrackLabel: the layout's name when sure, else
+// the circuit's) and the empty name for a track it cannot name, kind_key the type as stored (ecu's final verdict once the
 // session ends, its first one before), and last_lap the highest lap stored.
 func sessionsOf(sources []string) (string, []any) {
-	args := make([]any, len(sources))
-	for i, src := range sources {
-		args[i] = src
+	// The label of no track, format.TrackLabel's, is the empty name.
+	args := []any{format.TrackLabel(nil)}
+	for _, src := range sources {
+		args = append(args, src)
 	}
 	return `WITH s AS (
     SELECT s.*,
-        CASE WHEN s.track_sure THEN coalesce(s.track_name, '') ELSE '' END AS track_key,
+        CASE WHEN s.track_label IS NULL OR s.track_label = ? THEN '' ELSE s.track_label END AS track_key,
         coalesce(s.session_kind, s.type) AS kind_key,
         (SELECT max(l.lap) FROM laps l WHERE l.src = s.src AND l.session_id = s.id) AS last_lap
     FROM sessions s WHERE s.src IN (` + placeholders(len(sources)) + `)
@@ -371,7 +374,7 @@ func placeholders(n int) string {
 const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR, posted_at, last_lap,
     started_at, ended_at, kind_key, car_code, car_name, total_laps, laps_completed, started_fuel_at_start,
     joined_on_lap, fuel_capacity, best_lap, best_lap_ms, paused_ms, gaps::VARCHAR, pit_stops::VARCHAR,
-    track_id, track_name, track_sure`
+    kind::VARCHAR, track::VARCHAR`
 
 // findSession is the session id from the first of sources, in their order, that
 // has it.
@@ -412,7 +415,7 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 		if err := rows.Scan(&r.SessionId, &r.Source, &r.Closed, &endReason, &summary, &postedAt, &lastLap,
 			&o.startedAt, &o.endedAt, &o.kind, &o.carCode, &o.carName, &o.totalLaps, &o.lapsDone, &o.fuelAtStart,
 			&o.joinedOnLap, &o.fuelCapacity, &o.bestLap, &o.bestLapMs, &o.pausedMs, &o.gaps, &o.pitStops,
-			&o.trackID, &o.trackName, &o.trackSure); err != nil {
+			&o.kindJSON, &o.track); err != nil {
 			return nil, err
 		}
 		if endReason.Valid {
@@ -444,11 +447,11 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 type openRow struct {
 	startedAt                                 time.Time
 	endedAt                                   sql.NullTime
-	kind, carName, gaps, pitStops, trackName  sql.NullString
+	kind, carName, gaps, pitStops             sql.NullString
+	kindJSON, track                           sql.NullString
 	carCode, totalLaps, lapsDone, joinedOnLap sql.NullInt32
-	bestLap, bestLapMs, pausedMs, trackID     sql.NullInt32
+	bestLap, bestLapMs, pausedMs              sql.NullInt32
 	fuelAtStart, fuelCapacity                 sql.NullFloat64
-	trackSure                                 sql.NullBool
 }
 
 // summary is the summary of a session with no end, or one ended before schema 5
@@ -459,10 +462,9 @@ type openRow struct {
 //     joined_on_lap from session.started;
 //   - session_type and total_laps from the last session.kind, else
 //     session.started's;
-//   - track from the last session.track, or a continue's carried track before
-//     one. logbook keeps whether it was sure, not its confidence: a sure track
-//     reads TRACK_CONFIDENCE_PROBABLE (at least probable), and one not sure
-//     TRACK_CONFIDENCE_AMBIGUOUS;
+//   - kind, whole, from the last session.kind;
+//   - track, whole, from the last session.track, or a continue's carried track
+//     before one;
 //   - laps_completed, the complete laps stored;
 //   - best_lap and best_lap_time_ms from the last lap.best, absent before one;
 //   - paused_ms from session.paused and session.resumed;
@@ -491,14 +493,16 @@ func (o openRow) summary() (*eventsv1.SessionSummary, error) {
 	if o.bestLap.Valid {
 		sum.BestLap, sum.BestLapTimeMs = optionalInt(o.bestLap), optionalInt(o.bestLapMs)
 	}
-	if o.trackID.Valid || o.trackName.Valid || o.trackSure.Valid {
-		sum.Track = &eventsv1.TrackVerdict{TrackId: optionalInt(o.trackID), Name: o.trackName.String}
-		switch {
-		case !o.trackSure.Valid:
-		case o.trackSure.Bool:
-			sum.Track.Confidence = eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE
-		default:
-			sum.Track.Confidence = eventsv1.TrackConfidence_TRACK_CONFIDENCE_AMBIGUOUS
+	if o.kindJSON.Valid {
+		sum.Kind = &eventsv1.SessionKind{}
+		if err := protojson.Unmarshal([]byte(o.kindJSON.String), sum.Kind); err != nil {
+			return nil, fmt.Errorf("its kind: %w", err)
+		}
+	}
+	if o.track.Valid {
+		sum.Track = &eventsv1.TrackVerdict{}
+		if err := protojson.Unmarshal([]byte(o.track.String), sum.Track); err != nil {
+			return nil, fmt.Errorf("its track: %w", err)
 		}
 	}
 	var err error

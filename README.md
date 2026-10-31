@@ -332,15 +332,17 @@ protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
   for a session still open, or ended before schema 5 and not yet backfilled,
   what its events have said so far (schema 6): `session.started`'s fields,
   the last `session.kind` and `session.track`, the last `lap.best`, the time
-  paused, each continue's gap and each pit stop, and its complete laps. logbook
-  keeps whether a track was sure, not its confidence, so an open session's sure
-  track reads probable and one not sure ambiguous. A lap is its `lap.completed` with the frames
+  paused, each continue's gap and each pit stop, and its complete laps. The
+  kind and the track are the last events' own, whole. A lap is its `lap.completed` with the frames
   logbook counted and their top speed. logbook works out no flag: the reader
   does.
 - **In the query.** The filters, counts and pages run in DuckDB, so a reply
   holds only what was asked for. A page is 200 sessions when `limit` is 0, and
-  more than 500 is refused. A session whose track the detector was not sure of
-  has the empty track name.
+  more than 500 is refused. The track filter keys on the track's label as the
+  card and the pit wall show it (`track_label`, contracts' `format.TrackLabel`):
+  the layout's name when the detector was sure of it, else the circuit's; a
+  track it cannot name at all has the empty name. Same-track matches sure
+  tracks only.
 - **Never blocking.** Reads run on connections of their own, each in a
   snapshot, so a slow read never holds up a lap being written.
 - **Data versions.** The sessions and laps answers carry one for the whole

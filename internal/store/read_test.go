@@ -274,18 +274,22 @@ func TestGetSessionMapsWhatIsStored(t *testing.T) {
 	gap := &eventsv1.SessionGap{StartedAt: timestamppb.New(day(4).Add(time.Minute)),
 		EndedAt: timestamppb.New(day(4).Add(2 * time.Minute)), Lap: 2, Reason: eventsv1.GapReason_GAP_REASON_ENGINEER_RESTART}
 	stops := []*eventsv1.PitStop{{Stop: 1, InLap: 1, FuelAdded: 20}, {Stop: 2, InLap: 3, OutLap: proto.Int32(4)}}
+	kind := &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(5),
+		Field: true, Evidence: "a lap total and a field"}
+	track := &eventsv1.TrackVerdict{TrackId: proto.Int32(10), Name: "Suzuka Circuit", Family: "Suzuka",
+		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED}
+	var seq uint64
 	for _, ev := range []proto.Message{
-		&eventsv1.SessionKindChanged{SessionId: idOpen, Kind: &eventsv1.SessionKind{
-			SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(5)}},
-		&eventsv1.SessionTrackChanged{SessionId: idOpen, Track: &eventsv1.TrackVerdict{
-			TrackId: proto.Int32(10), Name: "Suzuka Circuit", Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED}},
+		&eventsv1.SessionKindChanged{SessionId: idOpen, Kind: kind},
+		&eventsv1.SessionTrackChanged{SessionId: idOpen, Track: track},
 		&eventsv1.LapBestChanged{SessionId: idOpen, Lap: 1, LapTimeMs: 98_100},
 		&eventsv1.SessionPaused{SessionId: idOpen, PausedMs: 1500},
 		&eventsv1.SessionContinued{SessionId: idOpen, RunId: "r", Gap: gap},
 		&eventsv1.PitExited{SessionId: idOpen, Stop: stops[0]},
 		&eventsv1.PitExited{SessionId: idOpen, Stop: stops[1]},
 	} {
-		if _, err := s.ApplyFact(ctx, SourceLive, ev); err != nil {
+		seq++
+		if _, err := s.ApplyFact(ctx, SourceLive, ev, seq); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -295,9 +299,7 @@ func TestGetSessionMapsWhatIsStored(t *testing.T) {
 	}
 	sum := want.GetSummary()
 	sum.SessionType, sum.TotalLaps = eventsv1.SessionType_SESSION_TYPE_LAP_RACE, proto.Int32(5)
-	// logbook keeps whether the track was sure, not its confidence.
-	sum.Track = &eventsv1.TrackVerdict{TrackId: proto.Int32(10), Name: "Suzuka Circuit",
-		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE}
+	sum.Kind, sum.Track = kind, track
 	sum.BestLap, sum.BestLapTimeMs, sum.PausedMs = proto.Int32(1), proto.Int32(98_100), 1500
 	sum.Gaps, sum.PitStops = []*eventsv1.SessionGap{gap}, stops
 	if d := diff(want, got.GetSession()); d != "" {
@@ -311,6 +313,51 @@ func TestGetSessionMapsWhatIsStored(t *testing.T) {
 	}
 	if want := []string{idOpen, idSuzuka1}; !slices.Equal(ids(list.GetSessions()), want) {
 		t.Errorf("lap races at Suzuka: %q, want %q", ids(list.GetSessions()), want)
+	}
+}
+
+// The track filter keys on the label the card and the pit wall show
+// (format.TrackLabel): a session whose layout the detector was not sure of,
+// but whose circuit it knew, is listed under the circuit, open or ended; one
+// it could not name at all has the empty name.
+func TestAFamilyOnlySessionFiltersUnderItsFamily(t *testing.T) {
+	s := open(t, t.TempDir())
+	ctx := t.Context()
+	nordschleife := &eventsv1.TrackVerdict{Name: "Nordschleife", Family: "Nürburgring",
+		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_AMBIGUOUS}
+	at(idSuzuka1, day(0), "Porsche 911 RSR", eventsv1.SessionType_SESSION_TYPE_LAP_RACE, nordschleife).write(t, s)
+	at(idSugo, day(1), "Porsche 911 RSR", eventsv1.SessionType_SESSION_TYPE_LAP_RACE,
+		&eventsv1.TrackVerdict{Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_NONE}).write(t, s)
+	open := at(idOpen, day(2), "Porsche 911 RSR", eventsv1.SessionType_SESSION_TYPE_LAP_RACE, nil)
+	if err := s.StartSession(ctx, open.started); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyFact(ctx, SourceLive, &eventsv1.SessionTrackChanged{SessionId: idOpen, Track: nordschleife}, 1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ListSessions(ctx, &storev1.ListSessionsRequest{Sources: live, Track: proto.String("Nürburgring")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{idOpen, idSuzuka1}; !slices.Equal(ids(got.GetSessions()), want) {
+		t.Errorf("under Nürburgring: %q, want %q", ids(got.GetSessions()), want)
+	}
+	want := []*storev1.ValueCount{{Value: "", Count: 1}, {Value: "Nürburgring", Count: 2}}
+	if len(got.GetOptions().GetTrack()) != len(want) {
+		t.Fatalf("track options %v, want %v", got.GetOptions().GetTrack(), want)
+	}
+	for i, v := range got.GetOptions().GetTrack() {
+		if !proto.Equal(v, want[i]) {
+			t.Errorf("track option %d: %v, want %v", i, v, want[i])
+		}
+	}
+	// Same-track stays on sure tracks: a circuit alone matches nothing.
+	same, err := s.ListSameTrack(ctx, &storev1.ListSameTrackRequest{Sources: live, SessionId: idOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(same.GetSessions()) != 0 {
+		t.Errorf("same track as an unsure Nordschleife: %q", ids(same.GetSessions()))
 	}
 }
 
@@ -524,6 +571,8 @@ func TestAnOpenSummaryWithBadJSONIsAnError(t *testing.T) {
 		{gaps: sql.NullString{String: "not json", Valid: true}},
 		{gaps: sql.NullString{String: `[{"lap":"x"}]`, Valid: true}},
 		{pitStops: sql.NullString{String: `{}`, Valid: true}},
+		{kindJSON: sql.NullString{String: `[]`, Valid: true}},
+		{track: sql.NullString{String: `"x"`, Valid: true}},
 	} {
 		if _, err := o.summary(); err == nil {
 			t.Errorf("%+v read", o)
