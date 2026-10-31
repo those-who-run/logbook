@@ -24,8 +24,9 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 ```
 
 - **Sources.** Live sessions, replays and parity runs share the index. Every
-  row and every path carries its source, `src`: `live`, `replay-<run>` or
-  `parity`. Readers show `live` unless asked for another.
+  row and every path carries its source, `src`: `live`, `replay-<run>`,
+  `parity`, or `v1-import` for v1's history ([below](#v1s-history)). Readers
+  show `live` unless asked for another.
 - **One process.** Opening the store takes an exclusive lock on
   `logbook.lock`, and a second process is refused (`ErrBusy`) rather than
   made to wait.
@@ -37,8 +38,8 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **A migration is one-way.** A logbook that brings the index to a new schema
   version leaves it unreadable to the release before, which refuses it as
   newer. Before deploying a release that migrates (schema version 4 came with
-  paddock#76, 5 with paddock#337's summary and 6 with its open-session
-  facts), stop logbook and copy
+  paddock#76, 5 with paddock#337's summary, 6 with its open-session
+  facts and 7 with `from_v1_rows`, paddock#264), stop logbook and copy
   `index.duckdb` (with `index.duckdb.wal`, if there is one) out of the data
   directory: [Schema 5](#schema-5-and-its-backfill) has the steps. Rolling back needs that
   copy put back: the sessions and laps written since are lost from the index,
@@ -202,6 +203,45 @@ On a cluster, with the StatefulSet of paddock's base:
    the migrated index, so it must not start in between.
 
 Rolling back needs the copy put back, as for any migration.
+
+## v1's history
+
+`logbook import-v1 --from DIR --data DIR [--dry-run]` imports v1's history
+(paddock#264, [ADR 0009](https://github.com/those-who-run/paddock/blob/main/docs/adr/0009-v1-history-import.md)
+in paddock) from `DIR`, a copy of v1's data directory taken with v1 stopped,
+into the store, under the source `v1-import`. Each session keeps v1's id
+(`20261017-143142`), so the links on v1's results cards keep working.
+
+- **Re-derived.** Each session's lap files (`sessions/<id>/lap-NN.parquet`)
+  go back through `salsa`'s v1 recording reader and `ecu`'s public `race`
+  package, the same code as live, as `ecu replay` runs a recording; the store
+  keeps what ecu makes of them, written as `logbook run` writes a live
+  session's events. v1's lap files lack a few of GT7's fields (the lap total,
+  the last and best lap times, the tank's size, the field's size and the
+  cars-on-track flag), so each frame takes them from v1's own summary first:
+  the session's values, and the lap times v1 stored for the laps before it.
+- **From v1's rows.** When ecu does not make exactly one ended session of v1's
+  (it splits it, discards it as a replay or a demo, or starts none), or the
+  lap files lack a column ecu needs, the session is taken from v1's
+  `summary.json` as v1 judged it, with v1's pit and out-lap flags, its lap
+  files still the frames v1 kept. `from_v1_rows` (schema 7) is true for
+  these, false for the re-derived, and null for every session v2 saw itself.
+- **Left out.** A session with no `summary.json` (v1 never ended it), with no
+  laps, or missing a lap file. One whose `summary.json` or lap file cannot be
+  read is left out and fails the import (exit 1) once the rest are done.
+- **The summary.** A line per v1 session: re-derived or from v1's rows with
+  its complete laps against v1's, and, for a re-derived one, each difference
+  from v1's rows beyond parity's tolerances (the complete laps, each lap's
+  time exactly, its fuel used to 0.001 L); left out with the reason; or
+  already imported. The last line has the counts only.
+- **Safe to repeat.** A session an earlier import wrote whole is found by its
+  source and id and left as it is, so a second run changes nothing.
+- **Read only, and one process.** It reads `DIR` and never writes there. It
+  refuses a v1 index with a `-wal` newer than itself (v1 still writing it),
+  and takes the store's lock, so it refuses while `logbook` runs on `--data`.
+  `--dry-run` prints the same summary, opening no store. It reads
+  `summary.json`, not `index.sqlite`: the summary holds every column of the
+  index's rows and more, and needs no SQLite reader.
 
 ## Running
 

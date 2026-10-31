@@ -41,6 +41,10 @@ const (
 // asked for another.
 const SourceLive = "live"
 
+// SourceV1Import is the source of the sessions `logbook import-v1` takes from v1's
+// history (paddock ADR 0009, point 3). Their ids are v1's own.
+const SourceV1Import = "v1-import"
+
 // ErrBusy is returned by Open while another process holds the data directory.
 var ErrBusy = errors.New("store: the data directory is in use by another process")
 
@@ -49,11 +53,15 @@ var ErrBusy = errors.New("store: the data directory is in use by another process
 var ErrUnknownSession = errors.New("store: no such session")
 
 // A source is `live`, `parity` or `replay-<run>`, as SessionStarted's source says,
-// and a session id is a ULID. Both become directory names, so anything else is
-// refused rather than allowed to reach outside the data directory.
+// or v1-import, and a session id is a ULID, or under v1-import v1's own id: its
+// start time, UTC, with -2, -3 and so on where two sessions started in one
+// second (v1's SessionStore.start_session). Both become directory names, so
+// anything else is refused rather than allowed to reach outside the data
+// directory.
 var (
-	validSource    = regexp.MustCompile(`^(live|parity|replay-[A-Za-z0-9][A-Za-z0-9._-]{0,63})$`)
+	validSource    = regexp.MustCompile(`^(live|parity|v1-import|replay-[A-Za-z0-9][A-Za-z0-9._-]{0,63})$`)
 	validSessionID = regexp.MustCompile(`^[0-9A-HJKMNP-TV-Z]{26}$`)
+	validV1ID      = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}(-[0-9]{1,4})?$`)
 )
 
 // Store is an open data directory. Its methods may be called from more than one
@@ -182,7 +190,13 @@ func CheckKey(src, sessionID string) error { return checkKey(sourceOf(src), sess
 // checkKey refuses a source or session id that cannot name a directory.
 func checkKey(src, sessionID string) error {
 	if !validSource.MatchString(src) {
-		return fmt.Errorf("store: source %q is not live, parity or replay-<run>", src)
+		return fmt.Errorf("store: source %q is not live, parity, v1-import or replay-<run>", src)
+	}
+	if src == SourceV1Import {
+		if !validV1ID.MatchString(sessionID) {
+			return fmt.Errorf("store: session id %q is not a v1 session id", sessionID)
+		}
+		return nil
 	}
 	if !validSessionID.MatchString(sessionID) {
 		return fmt.Errorf("store: session id %q is not a ULID", sessionID)

@@ -20,7 +20,7 @@ func export(ctx context.Context, args []string, getenv func(string) string, stdo
 	flags.SetOutput(stderr)
 	data := flags.String("data", getenv("TWR_DATA_DIR"), "the data directory (default $TWR_DATA_DIR)")
 	laps := flags.Bool("laps", false, "print the laps, one JSON object per line")
-	src := flags.String("src", store.SourceLive, "the source whose sessions to print: live, parity or replay-<run>")
+	src := flags.String("src", store.SourceLive, "the source whose sessions to print: live, parity, v1-import or replay-<run>")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0

@@ -1,0 +1,159 @@
+{
+  "session_id": "20261015-180014",
+  "type": "race",
+  "started_at": 1792087214.015985,
+  "ended_at": 1792087606.176172,
+  "driving_ms": 390108,
+  "paused_ms": 2052,
+  "ended_paused": false,
+  "track_id": 442,
+  "track": {
+    "id": 442,
+    "name": "Suzuka Circuit East Course",
+    "confidence": "confirmed",
+    "family": null,
+    "evidence": "finish line crossed, a full lap fits the layout (1.00)",
+    "candidates": [
+      {
+        "id": 442,
+        "name": "Suzuka Circuit East Course",
+        "fit": 0.995,
+        "line": true
+      }
+    ]
+  },
+  "session_kind": {
+    "kind": "lap_race",
+    "total_laps": 6,
+    "field": true,
+    "fuel_use": true,
+    "cars_on_track": true,
+    "start": "rolling",
+    "evidence": "6 laps, 2 cars; fuel use on; rolling start at 128 km/h"
+  },
+  "car_code": 683,
+  "car_name": "Honda Civic Si Group A version '87",
+  "total_laps": 6,
+  "laps_completed": 6,
+  "best_lap_ms": 59541,
+  "fastest_lap_ms": 57109,
+  "finished": true,
+  "joined_on_lap": null,
+  "total_time_ms": 389934,
+  "final_position": 1,
+  "total_cars": 2,
+  "fuel_burned": 130.393,
+  "fuel_burned_by_stint": [
+    73.825,
+    56.568
+  ],
+  "fuel_stints": [
+    73.825,
+    56.568
+  ],
+  "gt7_best_lap_ms": 59541,
+  "fuel_capacity": 100.0,
+  "fuel_at_start": 96.72370910644531,
+  "fuel_at_end": 43.43214797973633,
+  "fuel_used": 53.291,
+  "stints": 2,
+  "pit_stops": [
+    {
+      "stop": 1,
+      "in_lap": 3,
+      "out_lap": 4,
+      "pit_lane_secs": 12.16,
+      "stationary_secs": 8.39,
+      "fuel_before": 22.899,
+      "fuel_after": 99.999,
+      "fuel_added": 77.1,
+      "tyres_changed": false,
+      "pit_lane_kph": 60.0,
+      "position_before": 1,
+      "position_after": 1,
+      "evidence": "entry loading cut at 60.0 km/h; exit loading cut"
+    }
+  ],
+  "engineer_shutdown": false,
+  "gaps": [],
+  "laps": [
+    {
+      "lap": 1,
+      "lap_time_ms": 57109,
+      "complete": true,
+      "fuel_start": 96.72370910644531,
+      "fuel_end": 65.59944915771484,
+      "fuel_used": 31.124,
+      "position": 1,
+      "pit": null,
+      "frames": 118,
+      "file": "lap-01.parquet",
+      "recorded_at": 1792087270.95695
+    },
+    {
+      "lap": 2,
+      "lap_time_ms": 60538,
+      "complete": true,
+      "fuel_start": 65.59944915771484,
+      "fuel_end": 37.908443450927734,
+      "fuel_used": 27.691,
+      "position": 1,
+      "pit": null,
+      "frames": 121,
+      "file": "lap-02.parquet",
+      "recorded_at": 1792087331.5509014
+    },
+    {
+      "lap": 3,
+      "lap_time_ms": 82544,
+      "complete": true,
+      "fuel_start": 37.908443450927734,
+      "fuel_end": 22.89894676208496,
+      "fuel_used": 15.009,
+      "position": 1,
+      "pit": "in",
+      "frames": 166,
+      "file": "lap-03.parquet",
+      "recorded_at": 1792087416.2524934
+    },
+    {
+      "lap": 4,
+      "lap_time_ms": 69892,
+      "complete": true,
+      "fuel_start": 22.89894676208496,
+      "fuel_end": 81.47602844238281,
+      "fuel_used": -58.577,
+      "position": 1,
+      "pit": "out",
+      "frames": 146,
+      "file": "lap-04.parquet",
+      "recorded_at": 1792087486.2053812
+    },
+    {
+      "lap": 5,
+      "lap_time_ms": 59541,
+      "complete": true,
+      "fuel_start": 81.47602844238281,
+      "fuel_end": 62.81436538696289,
+      "fuel_used": 18.662,
+      "position": 1,
+      "pit": null,
+      "frames": 119,
+      "file": "lap-05.parquet",
+      "recorded_at": 1792087545.7986698
+    },
+    {
+      "lap": 6,
+      "lap_time_ms": 60310,
+      "complete": true,
+      "fuel_start": 62.81436538696289,
+      "fuel_end": 43.43214797973633,
+      "fuel_used": 19.382,
+      "position": 1,
+      "pit": null,
+      "frames": 122,
+      "file": "lap-06.parquet",
+      "recorded_at": 1792087606.176172
+    }
+  ]
+}

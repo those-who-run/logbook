@@ -36,7 +36,7 @@ type Lap struct {
 func (s *Store) Laps(ctx context.Context, src string) (laps []Lap, err error) {
 	src = sourceOf(src)
 	if !validSource.MatchString(src) {
-		return nil, fmt.Errorf("store: source %q is not live, parity or replay-<run>", src)
+		return nil, fmt.Errorf("store: source %q is not live, parity, v1-import or replay-<run>", src)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

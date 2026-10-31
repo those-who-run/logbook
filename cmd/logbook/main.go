@@ -3,6 +3,7 @@
 // services (svc.logbook.*) and serves GET /healthz until it gets SIGINT or
 // SIGTERM; `logbook export --data DIR --laps` prints the stored laps as JSON
 // lines; `logbook backfill --data DIR` fills the columns of schema 5 from EVENTS;
+// `logbook import-v1 --from DIR --data DIR` imports v1's history (paddock#264);
 // `logbook -version` prints its version. With no command it runs the template's
 // example service, which serves GET /healthz.
 package main
@@ -48,6 +49,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 			return backfill(ctx, args[1:], getenv, stdout, stderr)
 		case "export":
 			return export(ctx, args[1:], getenv, stdout, stderr)
+		case "import-v1":
+			return importV1(ctx, args[1:], getenv, stdout, stderr)
 		case "run":
 			return runCommand(ctx, args[1:], getenv, stdout, stderr)
 		}
