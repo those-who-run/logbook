@@ -138,6 +138,33 @@ ALTER TABLE sessions ADD COLUMN posted_at TIMESTAMP;
 ALTER TABLE laps ADD COLUMN pit_role VARCHAR;
 ALTER TABLE laps ADD COLUMN counts_for_best BOOLEAN;
 `,
+	// 6: an open session's facts, what its events say so far (paddock#337), for the
+	// open session's summary (paddock#122): joined_on_lap and fuel_capacity from
+	// session.started; best_lap from lap.best, with best_lap_ms; paused_ms from
+	// session.paused and session.resumed; gaps (JSON, each a SessionGap) from
+	// session.continued; pit_stops (JSON, each a PitStop) from pit.exited; kind
+	// (JSON, the SessionKind) from session.kind, with session_kind and total_laps;
+	// track (JSON, the TrackVerdict) from session.track, or a continue's carried
+	// track while there is none, with the track columns of 5 and track_label
+	// (contracts' format.TrackLabel), which the track filter keys on. The track,
+	// the kind and the best lap are the last event's: track_seq, kind_seq and
+	// best_seq keep the EVENTS sequence that set each, so an older event delivered
+	// again changes nothing. At the end, the summary's. Each is NULL in a row
+	// written before, until `logbook backfill` reads the events back from EVENTS.
+	`
+ALTER TABLE sessions ADD COLUMN joined_on_lap INTEGER;
+ALTER TABLE sessions ADD COLUMN fuel_capacity DOUBLE;
+ALTER TABLE sessions ADD COLUMN best_lap INTEGER;
+ALTER TABLE sessions ADD COLUMN paused_ms INTEGER;
+ALTER TABLE sessions ADD COLUMN gaps JSON;
+ALTER TABLE sessions ADD COLUMN pit_stops JSON;
+ALTER TABLE sessions ADD COLUMN kind JSON;
+ALTER TABLE sessions ADD COLUMN track JSON;
+ALTER TABLE sessions ADD COLUMN track_label VARCHAR;
+ALTER TABLE sessions ADD COLUMN kind_seq BIGINT;
+ALTER TABLE sessions ADD COLUMN track_seq BIGINT;
+ALTER TABLE sessions ADD COLUMN best_seq BIGINT;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

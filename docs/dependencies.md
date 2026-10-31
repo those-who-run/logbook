@@ -28,6 +28,6 @@ the test reads.
 | Module | Why |
 | --- | --- |
 | `github.com/duckdb/duckdb-go/v2` | DuckDB, embedded: the index (`index.duckdb`) and the Parquet lap files, which DuckDB writes itself (paddock ADR 0007). The official driver, maintained by the DuckDB team since it moved from `marcboeker/go-duckdb` at v2.5.0; MIT. It needs cgo, and brings DuckDB's prebuilt static library through `duckdb-go-bindings` (MIT). |
-| `github.com/those-who-run/contracts` | The messages the store writes from: `Frame`, `SessionStarted`, `SessionContinued` (v0.2), `LapCompleted`, `SessionEnded` and `CardPosted` (v0.2.6) (paddock ADR 0002). |
+| `github.com/those-who-run/contracts` | The messages the store writes from: `Frame`, `SessionStarted`, `SessionContinued` (v0.2), `LapCompleted`, `SessionEnded` and `CardPosted` (v0.2.6) (paddock ADR 0002), and its `format` package's `TrackLabel` (v0.2.8), so a session's stored track label is the card's and the pit wall's. |
 | `google.golang.org/protobuf` | The runtime the contracts' generated code is written for; the tests build messages with its helpers (`proto.Int32`, `timestamppb`), and the store keeps a session's summary as its JSON (`protojson`). |
 | `github.com/nats-io/nats.go` | The NATS client, with its `jetstream` package: `logbook run`'s two durable pull consumers, `logbook-frames` on `TELEMETRY` and `logbook-events` on `EVENTS` (paddock#38). The official Go client, from the NATS maintainers (`nats-io`); Apache-2.0. |

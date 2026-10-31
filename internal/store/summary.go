@@ -4,18 +4,26 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// summaryFields are the session columns schema 5 keeps from a session's summary:
-// summary, car_name, track_id, track_name and track_sure, in that order. The
-// summary is kept whole, as protobuf JSON; the others are its own fields, NULL
-// where it has none. An end with no summary leaves them all NULL.
-func summaryFields(sum *eventsv1.SessionSummary) ([5]driver.Value, error) {
-	var out [5]driver.Value
+// summarySet is the SET list of the session columns schema 5 keeps from a
+// session's summary, for summaryFields' values in its order. car_name,
+// joined_on_lap and fuel_capacity keep the start's where the summary has none.
+const summarySet = `summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?,
+    joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity), best_lap = ?,
+    paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?`
+
+// summaryFields are the values of summarySet from a session's summary: the
+// summary kept whole, as protobuf JSON, then its own fields, NULL where it has
+// none, the gaps and pit stops as JSON arrays. An end with no summary leaves them
+// all NULL.
+func summaryFields(sum *eventsv1.SessionSummary) ([]any, error) {
+	out := make([]any, 14)
 	if sum == nil {
 		return out, nil
 	}
@@ -27,6 +35,21 @@ func summaryFields(sum *eventsv1.SessionSummary) ([5]driver.Value, error) {
 	if t := sum.GetTrack(); t != nil {
 		out[2], out[3], out[4] = optional(t.TrackId), textOrNull(t.GetName()), trackSure(t.GetConfidence())
 	}
+	out[5], out[6], out[7] = optional(sum.JoinedOnLap), positiveOrNull(sum.GetFuelCapacity()), optional(sum.BestLap)
+	out[8] = sum.GetPausedMs()
+	if out[9], err = jsonArray(sum.GetGaps()); err != nil {
+		return out, err
+	}
+	if out[10], err = jsonArray(sum.GetPitStops()); err != nil {
+		return out, err
+	}
+	if out[11], err = jsonOf(sum.GetKind()); err != nil {
+		return out, err
+	}
+	if out[12], err = jsonOf(sum.GetTrack()); err != nil {
+		return out, err
+	}
+	out[13] = trackLabel(sum.GetTrack())
 	return out, nil
 }
 
@@ -94,10 +117,11 @@ UPDATE sessions SET posted_at = COALESCE(posted_at, ?) WHERE src = ? AND id = ?`
 }
 
 // BackfillSummary keeps ev's summary on a session stored before schema 5: its
-// summary, car_name and track columns, only where summary is still NULL, so the
-// first end's summary stays and a second run changes nothing. It changes no other
-// column. It says whether the row changed; a session the index does not hold is
-// skipped.
+// summary and the columns taken from it (summarySet), only where summary is
+// still NULL, so the first end's summary stays and a second run changes nothing.
+// It changes no other column. It says whether the row changed; a session the
+// index does not hold is skipped. A session that has its summary already gets
+// schema 6's columns from it with FillFromSummaries.
 func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.SessionEnded) (bool, error) {
 	src = sourceOf(src)
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
@@ -109,10 +133,41 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return changed(s.index.ExecContext(ctx, `
-UPDATE sessions SET summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?
-WHERE src = ? AND id = ? AND summary IS NULL`,
-		kept[0], kept[1], kept[2], kept[3], kept[4], src, ev.GetSessionId()))
+	return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
+WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
+		append(kept, src, ev.GetSessionId())...))
+}
+
+// FillFromSummaries fills schema 6's columns of every session that ended before
+// them (under logbook 0.1.7, schema 5) from its stored summary column: no event
+// is needed, so it works whatever EVENTS still holds. paused_ms, which an end
+// always sets, says whether they are there, so a second run changes nothing. It
+// returns the sessions it filled.
+func (s *Store) FillFromSummaries(ctx context.Context) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.index.QueryContext(ctx, `
+SELECT src, id, summary::VARCHAR FROM sessions WHERE summary IS NOT NULL AND paused_ms IS NULL`)
+	if err != nil {
+		return 0, fmt.Errorf("store: stored summaries: %w", err)
+	}
+	type stored struct{ src, id, summary string }
+	var todo []stored
+	for err == nil && rows.Next() {
+		var r stored
+		err = rows.Scan(&r.src, &r.id, &r.summary)
+		todo = append(todo, r)
+	}
+	if err = errors.Join(err, rows.Err(), rows.Close()); err != nil {
+		return 0, fmt.Errorf("store: stored summaries: %w", err)
+	}
+	for _, r := range todo {
+		if err := s.fillFromSummary(ctx, r.src, r.id, r.summary); err != nil {
+			return n, fmt.Errorf("store: the summary of %s/%s: %w", r.src, r.id, err)
+		}
+		n++
+	}
+	return n, nil
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema
@@ -160,4 +215,23 @@ func changed(res sql.Result, err error) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// fillFromSummary sets schema 6's columns of one session from its stored summary.
+// The caller holds s.mu.
+func (s *Store) fillFromSummary(ctx context.Context, src, id, summary string) error {
+	var sum eventsv1.SessionSummary
+	err := protojson.Unmarshal([]byte(summary), &sum)
+	var kept []any
+	if err == nil {
+		kept, err = summaryFields(&sum)
+	}
+	if err == nil {
+		_, err = s.index.ExecContext(ctx, `
+UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
+    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
+WHERE src = ? AND id = ? AND paused_ms IS NULL`,
+			append(kept[5:], src, id)...)
+	}
+	return err
 }

@@ -36,6 +36,7 @@ type storeAPI interface {
 	EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) error
 	DropStaged(ctx context.Context, src, sessionID string) error
 	MarkPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) error
+	ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error)
 }
 
 // storeError is a write the store could not make. It stops the runner, unacked, so
@@ -50,6 +51,16 @@ var (
 	typeLap       = mustType(&eventsv1.LapCompleted{})
 	typeEnded     = mustType(&eventsv1.SessionEnded{})
 	typePosted    = mustType(&eventsv1.CardPosted{})
+	// factTypes are the events whose facts an open session's row keeps
+	// (store.ApplyFact, paddock#337); session.continued's are kept by continued.
+	factTypes = map[string]func() proto.Message{
+		mustType(&eventsv1.SessionKindChanged{}):  func() proto.Message { return &eventsv1.SessionKindChanged{} },
+		mustType(&eventsv1.SessionTrackChanged{}): func() proto.Message { return &eventsv1.SessionTrackChanged{} },
+		mustType(&eventsv1.SessionPaused{}):       func() proto.Message { return &eventsv1.SessionPaused{} },
+		mustType(&eventsv1.SessionResumed{}):      func() proto.Message { return &eventsv1.SessionResumed{} },
+		mustType(&eventsv1.LapBestChanged{}):      func() proto.Message { return &eventsv1.LapBestChanged{} },
+		mustType(&eventsv1.PitExited{}):           func() proto.Message { return &eventsv1.PitExited{} },
+	}
 )
 
 func mustType(m proto.Message) string {
@@ -393,7 +404,15 @@ func (c *consumer) event(ctx context.Context, m jetstream.Msg) error {
 		}
 		err = c.posted(ctx, src, &ev, m)
 	default:
-		return ack(m)
+		mk, ok := factTypes[h.Get(ce.TypeHeader)]
+		if !ok {
+			return ack(m)
+		}
+		ev := mk()
+		if _, derr := ce.Decode(h, m.Data(), ev); derr != nil {
+			return c.drop(ctx, m, derr)
+		}
+		err = c.fact(ctx, src, ev, m)
 	}
 	return c.refused(ctx, m, err)
 }
@@ -782,6 +801,12 @@ func (c *consumer) continued(ctx context.Context, src string, ev *eventsv1.Sessi
 	}
 	k := store.Continuation{Run: ev.GetRunId(), FromSeq: ev.GetAt(), FromLap: max(ev.GetGap().GetLap(), 1),
 		At: at.UTC().Truncate(time.Microsecond)}
+	// Its gap and carried track before the run: a stop between the two leaves
+	// the continue unrecorded, so it comes again and both are applied again,
+	// which changes nothing the second time.
+	if _, err := c.st.ApplyFact(ctx, src, ev, streamSeq(m)); err != nil {
+		return storeError{err}
+	}
 	if err := c.st.ContinueSession(ctx, src, ev.GetSessionId(), k); err != nil {
 		return storeError{err}
 	}
@@ -836,6 +861,26 @@ func (c *consumer) posted(ctx context.Context, src string, ev *eventsv1.CardPost
 		return storeError{err}
 	}
 	c.log.InfoContext(ctx, "card posted", "src", src, "session", ev.GetSessionId())
+	return ack(m)
+}
+
+// fact keeps what a session event says in its session's row while the session is
+// open (store.ApplyFact): it waits on no frames. Once the session has ended it
+// changes nothing; an event of a session never started is dropped.
+func (c *consumer) fact(ctx context.Context, src string, ev proto.Message, m jetstream.Msg) error {
+	id := ev.(interface{ GetSessionId() string }).GetSessionId() //nolint:forcetypeassert // every factTypes event has one
+	if err := store.CheckKey(src, id); err != nil {
+		return c.drop(ctx, m, err)
+	}
+	_, err := c.st.ApplyFact(ctx, src, ev, streamSeq(m))
+	if errors.Is(err, store.ErrUnknownSession) {
+		c.log.WarnContext(ctx, "event of a session never started; dropped", "subject", m.Subject(), "session", id)
+		return term(m)
+	}
+	if err != nil {
+		return storeError{err}
+	}
+	c.log.DebugContext(ctx, "session fact kept", "subject", m.Subject(), "session", id)
 	return ack(m)
 }
 
@@ -1167,4 +1212,15 @@ func eventSource(subject string) (string, bool) {
 func runOf(id string) string {
 	run, _, _ := strings.Cut(id, ":frame:")
 	return run
+}
+
+// streamSeq is m's sequence in its stream, which orders the events of a session:
+// 0 when the message has no metadata, which only a message not from JetStream
+// lacks.
+func streamSeq(m jetstream.Msg) uint64 {
+	md, err := m.Metadata()
+	if err != nil {
+		return 0
+	}
+	return md.Sequence.Stream
 }

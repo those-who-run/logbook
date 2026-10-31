@@ -11,16 +11,25 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/those-who-run/contracts/ce"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/those-who-run/logbook/internal/store"
 )
 
-// backfillSubjects are the events the backfill reads back: the three whose fields
+// backfillSubjects are the events the backfill reads back: those whose fields
 // schema 5 added columns for.
 var backfillSubjects = []string{
+	"twr.v1.*.evt.*.session.started",
 	"twr.v1.*.evt.*.session.ended",
 	"twr.v1.*.evt.*.lap.completed",
 	"twr.v1.*.evt.*.card.posted",
+	"twr.v1.*.evt.*.session.continued",
+	"twr.v1.*.evt.*.session.kind",
+	"twr.v1.*.evt.*.session.track",
+	"twr.v1.*.evt.*.session.paused",
+	"twr.v1.*.evt.*.session.resumed",
+	"twr.v1.*.evt.*.lap.best",
+	"twr.v1.*.evt.*.pit.exited",
 }
 
 // backfillStore is what the backfill needs of the store.
@@ -28,6 +37,9 @@ type backfillStore interface {
 	BackfillSummary(ctx context.Context, src string, ev *eventsv1.SessionEnded) (bool, error)
 	BackfillLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (bool, error)
 	BackfillPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) (bool, error)
+	BackfillStarted(ctx context.Context, src string, ev *eventsv1.SessionStarted) (bool, error)
+	ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error)
+	FillFromSummaries(ctx context.Context) (int, error)
 }
 
 // BackfillCounts is what a backfill read and changed.
@@ -36,15 +48,21 @@ type BackfillCounts struct {
 	Sessions int // sessions given their summary
 	Laps     int // laps given their pit role
 	Cards    int // sessions given their posted_at
+	Starts   int // sessions given their start's joined_on_lap or fuel_capacity
+	Facts    int // events applied to a session still open
+	Stored   int // sessions given schema 6's columns from their stored summary
 }
 
 // Backfill fills schema 5's columns for what logbook stored before it (the schema 5
-// issue): it reads session.ended, lap.completed and card.posted back from EVENTS,
+// issue): it reads the events of backfillSubjects back from EVENTS,
 // from the stream's first message up to its last when the backfill began, with an
 // ephemeral ordered consumer, and hands each to the store's backfill writes. Those
 // fill only columns that are still NULL, on rows that exist, so it adds no session
-// or lap and a second run changes nothing. An event that cannot be read is
-// skipped with a warning.
+// or lap and a second run changes nothing. A session's own events (factTypes,
+// session.continued) are applied as the subscriber applies them
+// (store.ApplyFact): to a session still open, again to the same end, and to one
+// that has ended not at all, its summary having the last word. An event that
+// cannot be read is skipped with a warning.
 func Backfill(ctx context.Context, natsURL string, st backfillStore, logger *slog.Logger) (BackfillCounts, error) {
 	return backfill(ctx, natsURL, st, logger, nil)
 }
@@ -61,6 +79,13 @@ func backfill(ctx context.Context, natsURL string, st backfillStore, logger *slo
 	var n BackfillCounts
 	ctx, cancel := context.WithTimeout(ctx, backfillTimeout)
 	defer cancel()
+	// Sessions that ended under schema 5 have their summary stored: schema 6's
+	// columns come from it, whatever EVENTS still holds.
+	stored, err := st.FillFromSummaries(ctx)
+	n.Stored = stored
+	if err != nil {
+		return n, err
+	}
 	nc, err := nats.Connect(natsURL, nats.Name("logbook backfill"))
 	if err != nil {
 		return n, fmt.Errorf("nats %s: %w", natsURL, err)
@@ -101,13 +126,13 @@ func backfill(ctx context.Context, natsURL string, st backfillStore, logger *slo
 		return n, fmt.Errorf("backfill stopped after stream sequence %d of %d: %w", read, last, err)
 	}
 	logger.InfoContext(ctx, "backfill done", "last", last, "last_read", read,
-		"read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards)
+		"read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards, "starts", n.Starts, "facts", n.Facts, "stored", n.Stored)
 	return n, nil
 }
 
 // readBack hands each event the consumer delivers to the store, up to stream
 // sequence last, and returns the stream sequence of the last event it read. An
-// empty fetch ends it only once the server says none of the three is left
+// empty fetch ends it only once the server says none of its events is left
 // (NumPending 0): on a loaded host a fetch can time out with events still to come.
 func readBack(ctx context.Context, oc jetstream.Consumer, last uint64, st backfillStore, logger *slog.Logger,
 	n *BackfillCounts,
@@ -127,7 +152,7 @@ func readBack(ctx context.Context, oc jetstream.Consumer, last uint64, st backfi
 				return read, err
 			}
 			if info.NumPending == 0 {
-				return read, nil // nothing of the three after the last read
+				return read, nil // none of its events after the last read
 			}
 			logger.InfoContext(ctx, "backfill: a fetch came back empty with events pending; fetching again",
 				"pending", info.NumPending, "last_read", read)
@@ -202,8 +227,38 @@ func backfillOne(ctx context.Context, st backfillStore, m jetstream.Msg, n *Back
 		}
 		did, err = st.BackfillPosted(ctx, src, &ev)
 		cnt = &n.Cards
+	case typeStarted:
+		var ev eventsv1.SessionStarted
+		if _, derr := ce.Decode(h, m.Data(), &ev); derr != nil {
+			return badEvent{derr}
+		}
+		if err := checkEventKey(src, ev.GetSessionId()); err != nil {
+			return err
+		}
+		did, err = st.BackfillStarted(ctx, src, &ev)
+		cnt = &n.Starts
 	default:
-		return nil
+		mk, ok := factTypes[h.Get(ce.TypeHeader)]
+		if h.Get(ce.TypeHeader) == typeContinued {
+			mk, ok = func() proto.Message { return &eventsv1.SessionContinued{} }, true
+		}
+		if !ok {
+			return nil
+		}
+		ev := mk()
+		if _, derr := ce.Decode(h, m.Data(), ev); derr != nil {
+			return badEvent{derr}
+		}
+		if err := checkEventKey(src, ev.(interface{ GetSessionId() string }).GetSessionId()); err != nil { //nolint:forcetypeassert // each has one
+			return err
+		}
+		// Of a session that has ended, the summary has the last word and this
+		// changes nothing; of one the store does not hold, it is skipped.
+		did, err = st.ApplyFact(ctx, src, ev, streamSeq(m))
+		if errors.Is(err, store.ErrUnknownSession) {
+			did, err = false, nil
+		}
+		cnt = &n.Facts
 	}
 	if err != nil {
 		return err
