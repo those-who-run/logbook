@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -504,5 +505,28 @@ func TestALargePageStopsShortOfTheLimit(t *testing.T) {
 	}
 	if len(seen) != n {
 		t.Errorf("%d sessions across the pages, want %d", len(seen), n)
+	}
+}
+
+// An enum stored by a newer contract's number reads back as that number, and a
+// name that is neither as unspecified.
+func TestEnumValueOfAStoredName(t *testing.T) {
+	for name, want := range map[string]int32{"lap_race": 5, "ranked": 9, "42": 42, "bogus": 0} {
+		if got := enumValue(eventsv1.SessionType_value, "SESSION_TYPE_", name); got != want {
+			t.Errorf("%q: %d, want %d", name, got, want)
+		}
+	}
+}
+
+// A JSON column that cannot be read is an error, not a summary missing a part.
+func TestAnOpenSummaryWithBadJSONIsAnError(t *testing.T) {
+	for _, o := range []openRow{
+		{gaps: sql.NullString{String: "not json", Valid: true}},
+		{gaps: sql.NullString{String: `[{"lap":"x"}]`, Valid: true}},
+		{pitStops: sql.NullString{String: `{}`, Valid: true}},
+	} {
+		if _, err := o.summary(); err == nil {
+			t.Errorf("%+v read", o)
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
@@ -187,4 +188,48 @@ func TestARefusedReplyIs500(t *testing.T) {
 	if r.code != "500" || !strings.Contains(r.desc, "maximum payload") {
 		t.Errorf("code %q, %q", r.code, r.desc)
 	}
+}
+
+// Start adds the service and its endpoints to a connection, here one still
+// trying to reach its server, as logbook's is while NATS is down; Stop takes
+// them off.
+func TestStartAndStop(t *testing.T) {
+	nc, err := nats.Connect("nats://127.0.0.1:1", nats.RetryOnFailedConnect(true), nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	svc, err := Start(nc, failing{}, "dev", quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := svc.Info()
+	if info.Name != "logbook" || info.Version != "0.0.0-dev" || len(info.Endpoints) != len(Endpoints) {
+		t.Errorf("info %+v", info)
+	}
+	for _, e := range info.Endpoints {
+		if e.Metadata["request"] == "" || e.Metadata["response"] == "" {
+			t.Errorf("%s: metadata %v", e.Subject, e.Metadata)
+		}
+	}
+	if err := svc.Stop(); err != nil {
+		t.Error(err)
+	}
+}
+
+// An error that cannot be sent is logged.
+func TestAnUnsentErrorIsLogged(t *testing.T) {
+	var logs bytes.Buffer
+	r := &erring{request{data: []byte(`{}`)}}
+	Endpoints[0].handle(failing{}, slog.New(slog.NewTextHandler(&logs, nil))).Handle(r)
+	if !strings.Contains(logs.String(), "service error not sent") {
+		t.Errorf("logs %s", logs.String())
+	}
+}
+
+type erring struct{ request }
+
+func (*erring) Error(string, string, []byte, ...micro.RespondOpt) error {
+	return nats.ErrConnectionClosed
 }
