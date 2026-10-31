@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/duckdb/duckdb-go/v2"
+	"github.com/nats-io/nats.go"
+	"github.com/those-who-run/contracts/ce"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -80,6 +82,18 @@ func TestTheSubscriberKeepsTheSummaryPitRolesAndCard(t *testing.T) {
 	publish(t, js, []published{{subject: "twr.v1.live.evt." + sidB + ".card.posted", id: "live:" + sidB + ":card.posted:1",
 		at: postedAt, msg: &eventsv1.CardPosted{SessionId: sidB, PostedAt: timestamppb.New(postedAt)}}}, false)
 	in.logs.await(t, 1, "card of a session never started; dropped", map[string]any{"session": sidB})
+	// A card with no time, and one that cannot be read, are dropped.
+	publish(t, js, []published{{subject: "twr.v1.live.evt." + sidA + ".card.posted", id: "live:" + sidA + ":card.posted:2",
+		at: postedAt, msg: &eventsv1.CardPosted{SessionId: sidA}}}, false)
+	h, _, err := ce.Encode(&eventsv1.CardPosted{}, ce.Event{ID: "broken", Source: "/twr/podium", Time: postedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.PublishMsg(t.Context(), &nats.Msg{Subject: "twr.v1.live.evt." + sidA + ".card.posted",
+		Header: nats.Header(h), Data: []byte{0xff, 0xff}}); err != nil {
+		t.Fatal(err)
+	}
+	in.logs.await(t, 2, "event dropped", nil)
 	if err := in.stop(t); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +127,27 @@ func TestTheBackfillFillsWhatWasStoredBefore(t *testing.T) {
 			events = append(events, p)
 		}
 	}
+	// And events it cannot read: a bad session id of each type, and a broken one.
+	at := time.Date(2026, 10, 15, 19, 30, 0, 0, time.UTC)
+	events = append(events,
+		published{subject: "twr.v1.live.evt.x.session.ended", id: "x:session.ended:1", at: at,
+			msg: &eventsv1.SessionEnded{SessionId: "not-a-ulid"}},
+		published{subject: "twr.v1.live.evt.x.lap.completed", id: "x:lap.completed:1", at: at,
+			msg: &eventsv1.LapCompleted{SessionId: "not-a-ulid", Lap: 1}},
+		published{subject: "twr.v1.live.evt.x.card.posted", id: "x:card.posted:1", at: at,
+			msg: &eventsv1.CardPosted{SessionId: "not-a-ulid"}})
 	publish(t, js, events, false)
+	for what, m := range map[string]proto.Message{"session.ended": &eventsv1.SessionEnded{},
+		"lap.completed": &eventsv1.LapCompleted{}, "card.posted": &eventsv1.CardPosted{}} {
+		h, _, err := ce.Encode(m, ce.Event{ID: "broken:" + what, Source: "/twr/ecu/gt7", Time: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := &nats.Msg{Subject: "twr.v1.live.evt." + sidB + "." + what, Header: nats.Header(h), Data: []byte{0xff, 0xff}}
+		if _, err := js.PublishMsg(t.Context(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
 	conn, err := duckdb.NewConnector(filepath.Join(dir, "index.duckdb"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -140,9 +174,12 @@ UPDATE laps SET pit_role = NULL, counts_for_best = NULL`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Every event of the three: the race's 3 laps, its end and its card, and the
-		// other session's 3 laps and its end.
-		want.Read = 9
+		// Every event of the three: the race's 3 laps, its end and its card, the
+		// other session's 3 laps and its end, and the 6 it cannot read.
+		want.Read = 15
+		if n := len(logs.find("backfill: event skipped", nil)); n != 6 {
+			t.Errorf("run %d: %d events skipped, want 6:\n%s", run+1, n, logs.String())
+		}
 		if got != want {
 			t.Errorf("run %d: %+v, want %+v", run+1, got, want)
 		}
@@ -155,5 +192,28 @@ UPDATE laps SET pit_role = NULL, counts_for_best = NULL`)
 		if d := before.diff(takeSnapshot(t, dir)); d != "" {
 			t.Errorf("run %d: the backfill changed the store beyond schema 5's columns:\n%s", run+1, d)
 		}
+	}
+}
+
+// On an empty EVENTS the backfill reads nothing and changes nothing; without the
+// stream it fails.
+func TestTheBackfillOfAnEmptyStream(t *testing.T) {
+	srv, _ := testServer(t)
+	s, err := store.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	logger := slog.New(slog.NewJSONHandler(newLogs(), nil))
+	if got, err := Backfill(t.Context(), srv.ClientURL(), s, logger); err != nil || got != (BackfillCounts{}) {
+		t.Errorf("%+v, %v, want nothing", got, err)
+	}
+	bare := startNATS(t, 0)
+	if _, err := Backfill(t.Context(), bare.ClientURL(), s, logger); err == nil {
+		t.Error("a server with no EVENTS stream did not fail the backfill")
 	}
 }

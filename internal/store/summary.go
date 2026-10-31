@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
 
@@ -108,14 +109,10 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.index.ExecContext(ctx, `
+	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?
 WHERE src = ? AND id = ? AND summary IS NULL`,
-		kept[0], kept[1], kept[2], kept[3], kept[4], src, ev.GetSessionId())
-	if err != nil {
-		return false, fmt.Errorf("store: backfill session %s/%s: %w", src, ev.GetSessionId(), err)
-	}
-	return changed(res)
+		kept[0], kept[1], kept[2], kept[3], kept[4], src, ev.GetSessionId()))
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema
@@ -133,14 +130,10 @@ func (s *Store) BackfillLap(ctx context.Context, src string, lap *eventsv1.LapCo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.index.ExecContext(ctx, `
+	return changed(s.index.ExecContext(ctx, `
 UPDATE laps SET pit_role = ?, counts_for_best = ?
 WHERE src = ? AND session_id = ? AND lap = ? AND pit_role IS NULL`,
-		role, countsForBest(lap), src, lap.GetSessionId(), lap.GetLap())
-	if err != nil {
-		return false, fmt.Errorf("store: backfill lap %d of %s/%s: %w", lap.GetLap(), src, lap.GetSessionId(), err)
-	}
-	return changed(res)
+		role, countsForBest(lap), src, lap.GetSessionId(), lap.GetLap()))
 }
 
 // BackfillPosted is MarkPosted for the backfill: it says whether the row changed,
@@ -155,19 +148,16 @@ func (s *Store) BackfillPosted(ctx context.Context, src string, ev *eventsv1.Car
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.index.ExecContext(ctx, `
+	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET posted_at = ? WHERE src = ? AND id = ? AND posted_at IS NULL`,
-		ev.GetPostedAt().AsTime().UTC(), src, ev.GetSessionId())
-	if err != nil {
-		return false, fmt.Errorf("store: backfill card of %s/%s: %w", src, ev.GetSessionId(), err)
-	}
-	return changed(res)
+		ev.GetPostedAt().AsTime().UTC(), src, ev.GetSessionId()))
 }
 
-func changed(res interface{ RowsAffected() (int64, error) }) (bool, error) {
-	n, err := res.RowsAffected()
+// changed is whether a backfill's update changed a row.
+func changed(res sql.Result, err error) (bool, error) {
 	if err != nil {
-		return false, fmt.Errorf("store: %w", err)
+		return false, fmt.Errorf("store: backfill: %w", err)
 	}
-	return n > 0, nil
+	n, err := res.RowsAffected()
+	return n > 0, err
 }

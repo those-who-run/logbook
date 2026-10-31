@@ -112,6 +112,7 @@ func TestTrackSureIsAProbableOrConfirmedVerdict(t *testing.T) {
 			[]string{"2", "b", "false"}},
 		{&eventsv1.TrackVerdict{Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_NONE},
 			[]string{"NULL", "NULL", "false"}},
+		{&eventsv1.TrackVerdict{TrackId: proto.Int32(3), Name: "c"}, []string{"3", "c", "NULL"}},
 		{nil, []string{"NULL", "NULL", "NULL"}},
 	}
 	var want [][]string
@@ -298,5 +299,47 @@ VALUES ('live', 's', 1, 98000, true, 50, 49, 1, 1, 600, 600, 5000, 2, 'f', '2026
 				t.Errorf("start %d: new columns %q, want NULL", start+1, got)
 			}
 		})
+	}
+}
+
+// What a schema 5 write cannot use is refused or skipped, and changes nothing: a
+// bad key, a card with no time, a lap with no pit role, an end with no summary.
+func TestSchema5WritesRefuseWhatTheyCannotUse(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race("live", sid)
+	sess.write(t, s)
+	before5(t, s)
+	ctx := t.Context()
+	bad := "not-a-ulid"
+	at := timestamppb.New(time.Date(2026, 10, 15, 19, 35, 2, 0, time.UTC))
+	if err := s.MarkPosted(ctx, "live", &eventsv1.CardPosted{SessionId: bad, PostedAt: at}); err == nil {
+		t.Error("MarkPosted took a bad session id")
+	}
+	if err := s.MarkPosted(ctx, "live", &eventsv1.CardPosted{SessionId: sid}); err == nil {
+		t.Error("MarkPosted took a card with no posted_at")
+	}
+	if _, err := s.BackfillSummary(ctx, "live", &eventsv1.SessionEnded{SessionId: bad}); err == nil {
+		t.Error("BackfillSummary took a bad session id")
+	}
+	if _, err := s.BackfillLap(ctx, "live", &eventsv1.LapCompleted{SessionId: bad, Lap: 1}); err == nil {
+		t.Error("BackfillLap took a bad session id")
+	}
+	if _, err := s.BackfillPosted(ctx, "live", &eventsv1.CardPosted{SessionId: bad, PostedAt: at}); err == nil {
+		t.Error("BackfillPosted took a bad session id")
+	}
+	noRole := proto.Clone(sess.laps[0]).(*eventsv1.LapCompleted)
+	noRole.PitRole = eventsv1.PitRole_PIT_ROLE_UNSPECIFIED
+	for name, f := range map[string]func() (bool, error){
+		"an end with no summary": func() (bool, error) { return s.BackfillSummary(ctx, "live", &eventsv1.SessionEnded{SessionId: sid}) },
+		"a lap with no pit role": func() (bool, error) { return s.BackfillLap(ctx, "live", noRole) },
+		"a card with no time":    func() (bool, error) { return s.BackfillPosted(ctx, "live", &eventsv1.CardPosted{SessionId: sid}) },
+	} {
+		if did, err := f(); did || err != nil {
+			t.Errorf("%s: %v, %v, want skipped", name, did, err)
+		}
+	}
+	got := rowsOf(t, ctx, s.index, `SELECT `+schema5Sessions+` FROM sessions`)
+	if want := [][]string{slices.Repeat([]string{"NULL"}, 6)}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%s %q, want NULL", schema5Sessions, got)
 	}
 }
