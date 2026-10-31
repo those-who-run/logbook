@@ -2,12 +2,15 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -345,10 +348,6 @@ func TestTheDataVersion(t *testing.T) {
 			r, err := s.ListSameTrack(ctx, &storev1.ListSameTrackRequest{Sources: live, SessionId: idSugo, KnownDataVersion: req.KnownDataVersion})
 			return r.GetUnchanged() && r.GetSessions() == nil, err
 		},
-		"trace": func() (bool, error) {
-			r, err := s.GetTrace(ctx, &storev1.GetTraceRequest{Sources: live, SessionId: idSugo, Lap: 1, KnownDataVersion: req.KnownDataVersion})
-			return r.GetUnchanged() && r.GetTrace() == nil, err
-		},
 	} {
 		if ok, err := unchanged(); err != nil || !ok {
 			t.Errorf("%s with the current version: unchanged %v, %v", name, ok, err)
@@ -380,5 +379,67 @@ func TestAReadAfterCloseIsRefused(t *testing.T) {
 	}
 	if _, err := s.ListSessions(t.Context(), &storev1.ListSessionsRequest{Sources: live}); err == nil {
 		t.Error("a read after Close answered")
+	}
+}
+
+// A page of 500 large sessions (8 track candidates and 6 pit stops each) would
+// pass NATS's 1 MiB limit: the reply stops short of it, and the pages that
+// follow from offset plus what came give every session once.
+func TestALargePageStopsShortOfTheLimit(t *testing.T) {
+	s := open(t, t.TempDir())
+	ctx := t.Context()
+	const n = 500
+	for i := range n {
+		id := fmt.Sprintf("01JB8Z3K5Q9T2M7XW4R6N1%04d", i)
+		sess := at(id, day(0).Add(time.Duration(i)*time.Minute), "Porsche 911 RSR", eventsv1.SessionType_SESSION_TYPE_LAP_RACE,
+			trackOf(10, "Suzuka Circuit", eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED))
+		sum := sess.ended.GetSummary()
+		sum.Track.Evidence = strings.Repeat("the start line and the hairpin fit; ", 4)
+		for c := range 8 {
+			sum.Track.Candidates = append(sum.Track.Candidates, &eventsv1.TrackCandidate{
+				TrackId: int32(c), Name: fmt.Sprintf("Candidate circuit layout %d", c), Fit: 0.123456789 * float64(c), LineCrossed: true,
+			})
+		}
+		for p := range 6 {
+			sum.PitStops = append(sum.PitStops, &eventsv1.PitStop{
+				Stop: int32(p + 1), InLap: int32(p*5 + 4), OutLap: proto.Int32(int32(p*5 + 5)), PitLaneMs: proto.Int32(31234),
+				StationaryMs: 12345, FuelBefore: 12.345678, FuelAfter: 98.765432, FuelAdded: 86.419754, TyresChanged: true,
+				PitLaneKph: proto.Float64(59.87654321), PositionBefore: proto.Int32(3), PositionAfter: proto.Int32(7),
+			})
+		}
+		sum.Kind = &eventsv1.SessionKind{SessionType: sum.GetSessionType(), Evidence: strings.Repeat("a lap total and a field; ", 4)}
+		if err := s.StartSession(ctx, sess.started); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.EndSession(ctx, SourceLive, sess.ended, sess.endedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := map[string]bool{}
+	for offset := int32(0); offset < n; {
+		got, err := s.ListSessions(ctx, &storev1.ListSessionsRequest{Sources: live, Offset: offset, Limit: MaxLimit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := protojson.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(b) > replyBudget || len(got.GetSessions()) == 0 || got.GetMatched() != n {
+			t.Fatalf("from %d: %d bytes, %d sessions, matched %d", offset, len(b), len(got.GetSessions()), got.GetMatched())
+		}
+		if offset == 0 && len(got.GetSessions()) == n {
+			t.Errorf("the first page holds all %d sessions in %d bytes: the rows are not large enough to test", n, len(b))
+		}
+		for _, r := range got.GetSessions() {
+			if seen[r.GetSessionId()] {
+				t.Errorf("%s twice", r.GetSessionId())
+			}
+			seen[r.GetSessionId()] = true
+		}
+		offset += int32(len(got.GetSessions())) //nolint:gosec // at most 500
+	}
+	if len(seen) != n {
+		t.Errorf("%d sessions across the pages, want %d", len(seen), n)
 	}
 }

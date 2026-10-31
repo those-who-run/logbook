@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"testing"
 
+	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // v1Trace is one of v1's lap traces, as testdata/traces/v1_lap_trace.py saved it
@@ -180,5 +182,48 @@ func TestRoundIsPythons(t *testing.T) {
 		if got := round(c.v, digits); got != c.want {
 			t.Errorf("round(%v, %d) = %v, want %v", c.v, digits, got, c.want)
 		}
+	}
+}
+
+// R7: a trace's version is its lap's: another lap written leaves it, the lap
+// written again with other frames changes it, and a caller that has it is told
+// unchanged, with no trace.
+func TestATraceVersionIsItsLaps(t *testing.T) {
+	s, src, id := tracedReplay(t)
+	ctx := t.Context()
+	version := func(lap int32) string {
+		t.Helper()
+		got, err := s.GetTrace(ctx, &storev1.GetTraceRequest{Sources: []string{src}, SessionId: id, Lap: lap})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.GetDataVersion()
+	}
+	two, three := version(2), version(3)
+	if two == three || two == "" {
+		t.Errorf("laps 2 and 3: versions %q and %q", two, three)
+	}
+	r := readReplay(t)
+	if err := s.WriteLap(ctx, src, r.laps[2], r.frames); err != nil { // lap 3 again, unchanged
+		t.Fatal(err)
+	}
+	if got := version(2); got != two {
+		t.Errorf("lap 2 after lap 3 was written again: %q, was %q", got, two)
+	}
+	shorter := proto.Clone(r.laps[1]).(*eventsv1.LapCompleted) //nolint:forcetypeassert // a clone of a LapCompleted
+	shorter.LastSeq--
+	if err := s.WriteLap(ctx, src, shorter, r.frames); err != nil {
+		t.Fatal(err)
+	}
+	now := version(2)
+	if now == two {
+		t.Errorf("lap 2 written again with a frame less kept its version %q", two)
+	}
+	got, err := s.GetTrace(ctx, &storev1.GetTraceRequest{Sources: []string{src}, SessionId: id, Lap: 2, KnownDataVersion: proto.String(now)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.GetUnchanged() || got.GetTrace() != nil || got.GetDataVersion() != now {
+		t.Errorf("with its current version: %v", got)
 	}
 }

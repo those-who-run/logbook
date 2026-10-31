@@ -62,7 +62,8 @@ func (s *Store) touch() { s.writes.Add(1) }
 // DataVersion is the store's data version: one stamp for the whole store, which
 // changes when a write is made, and on a restart. A read takes it before it
 // reads, so an answer never carries a version newer than its data: a write
-// between the two only makes the next poll read again.
+// between the two only makes the next poll read again. The sessions and laps
+// answers carry it; a trace carries its lap's own (GetTrace).
 func (s *Store) DataVersion() string {
 	return s.epoch + "." + strconv.FormatUint(s.writes.Load(), 10)
 }
@@ -102,7 +103,10 @@ ORDER BY started_at DESC, src, id LIMIT ? OFFSET ?`,
 		if err != nil {
 			return err
 		}
-		out.Sessions, err = scanRows(rows)
+		if out.Sessions, err = scanRows(rows); err != nil {
+			return err
+		}
+		out.Sessions, err = fit(out, out.GetSessions())
 		return err
 	})
 	if err != nil {
@@ -198,7 +202,10 @@ func (s *Store) ListSameTrack(ctx context.Context, req *storev1.ListSameTrackReq
 		if err != nil {
 			return err
 		}
-		out.Sessions, err = scanRows(rows)
+		if out.Sessions, err = scanRows(rows); err != nil {
+			return err
+		}
+		out.Sessions, err = fit(out, out.GetSessions())
 		return err
 	})
 	if err != nil {
@@ -220,24 +227,32 @@ func (s *Store) GetTrace(ctx context.Context, req *storev1.GetTraceRequest) (*st
 	if points == 0 {
 		points = DefaultPoints
 	}
-	version := s.DataVersion()
-	if req.KnownDataVersion != nil && req.GetKnownDataVersion() == version {
-		return &storev1.GetTraceResponse{DataVersion: version, Unchanged: true}, nil
-	}
-	out := &storev1.GetTraceResponse{DataVersion: version}
+	out := &storev1.GetTraceResponse{}
 	err := s.read(ctx, func(tx *sql.Tx) error {
 		row, err := findSession(ctx, tx, req.GetSources(), req.GetSessionId())
 		if err != nil {
 			return err
 		}
 		var file string
-		err = tx.QueryRowContext(ctx, `SELECT file FROM laps WHERE src = ? AND session_id = ? AND lap = ?`,
-			row.GetSource(), req.GetSessionId(), req.GetLap()).Scan(&file)
+		var recordedAt time.Time
+		var frames, firstSeq, lastSeq int64
+		err = tx.QueryRowContext(ctx, `SELECT file, recorded_at, frames, first_seq, last_seq
+FROM laps WHERE src = ? AND session_id = ? AND lap = ?`,
+			row.GetSource(), req.GetSessionId(), req.GetLap()).Scan(&file, &recordedAt, &frames, &firstSeq, &lastSeq)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: lap %d of session %s", ErrNotFound, req.GetLap(), req.GetSessionId())
 		}
 		if err != nil {
 			return err
+		}
+		// The lap's own version (#123 R7), from its row: a lap written again with
+		// other frames changes its count or its seqs, and its row is written after
+		// its file, so the version never runs ahead of the frames.
+		out.DataVersion = "lap." + strconv.FormatInt(recordedAt.UnixMicro(), 36) + "." +
+			strconv.FormatInt(frames, 10) + "." + strconv.FormatInt(firstSeq, 10) + "." + strconv.FormatInt(lastSeq, 10)
+		if req.KnownDataVersion != nil && req.GetKnownDataVersion() == out.DataVersion {
+			out.Unchanged = true
+			return nil
 		}
 		out.Trace, err = s.lapTrace(ctx, tx, file, int(points))
 		if err != nil {
@@ -250,6 +265,37 @@ func (s *Store) GetTrace(ctx context.Context, req *storev1.GetTraceRequest) (*st
 		return nil, err
 	}
 	return out, nil
+}
+
+// replyBudget is the most a list's reply may take as protobuf JSON: under NATS's
+// 1 MiB payload limit, with room for the headers.
+var replyBudget = 900 << 10
+
+// fit is the sessions of reply, rows, cut to those that keep its JSON within
+// replyBudget, in order: the contract answers "at most limit", and the caller
+// pages on from offset plus what it got. A page always keeps its first row.
+func fit(reply proto.Message, rows []*storev1.SessionRow) ([]*storev1.SessionRow, error) {
+	b, err := protojson.Marshal(reply)
+	if err != nil || len(b) <= replyBudget {
+		return rows, err
+	}
+	// The reply without its rows, then each row and a comma.
+	bare := proto.Clone(reply)
+	bare.ProtoReflect().Clear(bare.ProtoReflect().Descriptor().Fields().ByName("sessions"))
+	if b, err = protojson.Marshal(bare); err != nil {
+		return nil, err
+	}
+	size := len(b) + len(`,"sessions":[]`)
+	for i, r := range rows {
+		rb, err := protojson.Marshal(r)
+		if err != nil {
+			return nil, err
+		}
+		if size += len(rb) + 1; size > replyBudget && i > 0 {
+			return rows[:i], nil
+		}
+	}
+	return rows, nil
 }
 
 // read runs f in a transaction on the reader, so each read sees one snapshot of
@@ -381,6 +427,12 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 			// SessionRow). logbook keeps SessionStarted's fields and its laps; the
 			// other events the contract names are not stored yet, so their fields are
 			// absent.
+			//
+			// TODO(paddock#122): fill the rest from the columns migration 5 is gaining
+			// on main (joined_on_lap, fuel_capacity, best_lap with best_lap_ms,
+			// paused_ms, gaps and pit_stops as JSON, and the track_* and
+			// session_kind columns the TrackChanged and KindChanged writers keep),
+			// once that PR merges and is merged in here.
 			r.Summary = &eventsv1.SessionSummary{
 				StartedAt:     timestamppb.New(startedAt.UTC()),
 				SessionType:   eventsv1.SessionType(enumValue(eventsv1.SessionType_value, "SESSION_TYPE_", typ.String)),

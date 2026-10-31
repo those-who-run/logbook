@@ -299,9 +299,16 @@ protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
   has the empty track name.
 - **Never blocking.** Reads run on connections of their own, each in a
   snapshot, so a slow read never holds up a lap being written.
-- **One data version** for the whole store: it changes with every write, and
-  on a restart. A request that carries the current one as
-  `known_data_version` is answered `unchanged`, with nothing else.
+- **Data versions.** The sessions and laps answers carry one for the whole
+  store, which changes with every write, and on a restart. A trace carries its
+  lap's own, from its row (`recorded_at`, `frames`, `first_seq`, `last_seq`),
+  so another lap's write leaves it (#123 R7). A request that carries the
+  current one as `known_data_version` is answered `unchanged`, with nothing
+  else.
+- **Under 1 MiB.** A list stops adding sessions once its JSON nears 900 KiB,
+  short of NATS's payload limit; the contract answers "at most limit", and the
+  caller pages on from `offset` plus what it got. A reply the server still
+  refuses is answered 500, never left to time out.
 - **Errors** are NATS micro's error headers: 400 for a bad request (no
   sources, a page over 500, a day or time zone that cannot be read, points
   over 10,000), 404 for a session, lap or lap file the sources do not have

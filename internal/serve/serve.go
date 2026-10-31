@@ -124,14 +124,17 @@ func endpoint[Req, Resp proto.Message](name, subject string, read func(Store, co
 	}
 }
 
+// respond sends m, or a 500 when it cannot be sent: a reply the server refuses,
+// such as one over its payload limit, would leave the caller waiting out its
+// timeout.
 func respond(r micro.Request, logger *slog.Logger, subject string, m proto.Message) {
 	b, err := protojson.Marshal(m)
-	if err != nil {
-		respondError(r, logger, subject, "500", err.Error())
-		return
+	if err == nil {
+		err = r.Respond(b)
 	}
-	if err := r.Respond(b); err != nil {
-		logger.Warn("service reply not sent", "subject", subject, "err", err)
+	if err != nil {
+		logger.Error("service reply not sent", "subject", subject, "bytes", len(b), "err", err)
+		respondError(r, logger, subject, "500", "the reply could not be sent: "+err.Error())
 	}
 }
 

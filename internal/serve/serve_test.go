@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,10 +26,17 @@ type request struct {
 	data       []byte
 	answer     []byte
 	code, desc string
+	refuse     error // what Respond returns, as a server over its payload limit would
 }
 
-func (r *request) Respond(b []byte, _ ...micro.RespondOpt) error { r.answer = b; return nil }
-func (r *request) RespondJSON(any, ...micro.RespondOpt) error    { return errors.New("not used") }
+func (r *request) Respond(b []byte, _ ...micro.RespondOpt) error {
+	if r.refuse != nil {
+		return r.refuse
+	}
+	r.answer = b
+	return nil
+}
+func (r *request) RespondJSON(any, ...micro.RespondOpt) error { return errors.New("not used") }
 func (r *request) Error(code, desc string, _ []byte, _ ...micro.RespondOpt) error {
 	r.code, r.desc = code, desc
 	return nil
@@ -163,5 +171,20 @@ func TestTheServiceVersionIsSemver(t *testing.T) {
 		if got := semver(in); got != want {
 			t.Errorf("semver(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A reply the server refuses (nats.ErrMaxPayload) is answered 500, so the
+// caller is not left to time out.
+func TestARefusedReplyIs500(t *testing.T) {
+	st, err := store.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	r := &request{data: []byte(`{"sources":["live"]}`), refuse: nats.ErrMaxPayload}
+	Endpoints[0].handle(st, quiet()).Handle(r)
+	if r.code != "500" || !strings.Contains(r.desc, "maximum payload") {
+		t.Errorf("code %q, %q", r.code, r.desc)
 	}
 }
