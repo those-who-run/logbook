@@ -4,8 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
-	"slices"
 
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -119,11 +119,10 @@ UPDATE sessions SET posted_at = COALESCE(posted_at, ?) WHERE src = ? AND id = ?`
 
 // BackfillSummary keeps ev's summary on a session stored before schema 5: its
 // summary and the columns taken from it (summarySet), only where summary is
-// still NULL, so the first end's summary stays. On a session that has its
-// summary but not schema 6's columns (ended under logbook 0.1.7), it fills those
-// from the summary, once: paused_ms, which an end always sets, says whether they
-// are there. A second run changes nothing. It changes no other column. It says
-// whether the row changed; a session the index does not hold is skipped.
+// still NULL, so the first end's summary stays and a second run changes nothing.
+// It changes no other column. It says whether the row changed; a session the
+// index does not hold is skipped. A session that has its summary already gets
+// schema 6's columns from it with FillFromSummaries.
 func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.SessionEnded) (bool, error) {
 	src = sourceOf(src)
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
@@ -136,17 +135,42 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	defer s.touch()
-	did, err := changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
+	return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
 WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
-		append(slices.Clone(kept), src, ev.GetSessionId())...))
-	if err != nil || did {
-		return did, err
+		append(kept, src, ev.GetSessionId())...))
+}
+
+// FillFromSummaries fills schema 6's columns of every session that ended before
+// them (under logbook 0.1.7, schema 5) from its stored summary column: no event
+// is needed, so it works whatever EVENTS still holds. paused_ms, which an end
+// always sets, says whether they are there, so a second run changes nothing. It
+// returns the sessions it filled.
+func (s *Store) FillFromSummaries(ctx context.Context) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer s.touch()
+	rows, err := s.index.QueryContext(ctx, `
+SELECT src, id, summary::VARCHAR FROM sessions WHERE summary IS NOT NULL AND paused_ms IS NULL`)
+	if err != nil {
+		return 0, fmt.Errorf("store: stored summaries: %w", err)
 	}
-	return changed(s.index.ExecContext(ctx, `
-UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
-    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
-WHERE src = ? AND id = ? AND summary IS NOT NULL AND paused_ms IS NULL`,
-		append(slices.Clone(kept[5:]), src, ev.GetSessionId())...))
+	type stored struct{ src, id, summary string }
+	var todo []stored
+	for err == nil && rows.Next() {
+		var r stored
+		err = rows.Scan(&r.src, &r.id, &r.summary)
+		todo = append(todo, r)
+	}
+	if err = errors.Join(err, rows.Err(), rows.Close()); err != nil {
+		return 0, fmt.Errorf("store: stored summaries: %w", err)
+	}
+	for _, r := range todo {
+		if err := s.fillFromSummary(ctx, r.src, r.id, r.summary); err != nil {
+			return n, fmt.Errorf("store: the summary of %s/%s: %w", r.src, r.id, err)
+		}
+		n++
+	}
+	return n, nil
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema
@@ -196,4 +220,23 @@ func changed(res sql.Result, err error) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// fillFromSummary sets schema 6's columns of one session from its stored summary.
+// The caller holds s.mu.
+func (s *Store) fillFromSummary(ctx context.Context, src, id, summary string) error {
+	var sum eventsv1.SessionSummary
+	err := protojson.Unmarshal([]byte(summary), &sum)
+	var kept []any
+	if err == nil {
+		kept, err = summaryFields(&sum)
+	}
+	if err == nil {
+		_, err = s.index.ExecContext(ctx, `
+UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
+    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
+WHERE src = ? AND id = ? AND paused_ms IS NULL`,
+			append(kept[5:], src, id)...)
+	}
+	return err
 }

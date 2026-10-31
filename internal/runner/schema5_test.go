@@ -1,11 +1,13 @@
 package runner
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -363,5 +365,21 @@ func TestAnOpenSessionKeepsItsFacts(t *testing.T) {
 	}
 	if got := indexRows(t, dir, q); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("after the backfill %q,\nwant %q", got, want)
+	}
+}
+
+// failingFill is a store whose fill from stored summaries fails.
+type failingFill struct{ backfillStore }
+
+func (failingFill) FillFromSummaries(context.Context) (int, error) {
+	return 0, errors.New("disk on fire")
+}
+
+// A fill from the stored summaries that fails stops the backfill before it reads
+// EVENTS, with the error.
+func TestTheBackfillStopsWhenTheStoredFillFails(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(newLogs(), nil))
+	if _, err := Backfill(t.Context(), "nats://127.0.0.1:1", failingFill{}, logger); err == nil || !strings.Contains(err.Error(), "disk on fire") {
+		t.Errorf("%v, want the fill's error", err)
 	}
 }
