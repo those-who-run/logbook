@@ -19,6 +19,10 @@ import (
 const (
 	schema5Sessions = `summary, car_name, track_id, track_name, track_sure, posted_at`
 	schema5Laps     = `pit_role, counts_for_best`
+	// schema5Open are the columns an open session's events fill (paddock#337).
+	schema5Open = `joined_on_lap, fuel_capacity, best_lap, paused_ms, gaps, pit_stops`
+	// schema5All is every sessions column migration 5 adds.
+	schema5All = schema5Sessions + `, ` + schema5Open
 )
 
 // withSummary gives sess the summary ecu sends from contracts v0.2: a car, a
@@ -171,7 +175,8 @@ func TestMarkPostedKeepsTheFirstPost(t *testing.T) {
 func before5(t *testing.T, s *Store) {
 	t.Helper()
 	if _, err := s.index.ExecContext(t.Context(), `
-UPDATE sessions SET summary = NULL, car_name = NULL, track_id = NULL, track_name = NULL, track_sure = NULL, posted_at = NULL;
+UPDATE sessions SET summary = NULL, car_name = NULL, track_id = NULL, track_name = NULL, track_sure = NULL, posted_at = NULL,
+    joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL;
 UPDATE laps SET pit_role = NULL, counts_for_best = NULL`); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +191,7 @@ func TestTheBackfillFillsOnlyTheNewColumnsOnce(t *testing.T) {
 	sess.write(t, s)
 	before5(t, s)
 	const (
-		others    = `SELECT * EXCLUDE (` + schema5Sessions + `) FROM sessions ORDER BY src, id`
+		others    = `SELECT * EXCLUDE (` + schema5All + `) FROM sessions ORDER BY src, id`
 		otherLaps = `SELECT * EXCLUDE (` + schema5Laps + `) FROM laps ORDER BY src, session_id, lap`
 	)
 	wantOthers := rowsOf(t, t.Context(), s.index, others)
@@ -247,7 +252,7 @@ func TestTheBackfillFillsOnlyTheNewColumnsOnce(t *testing.T) {
 	}
 }
 
-// AC4: an index at schema version 4 opens at 5 with its rows unchanged and the new
+// AC4: an index at schema version 4 opens at the code's (5, then 6) with its rows unchanged and the new
 // columns NULL, and a second open changes nothing.
 func TestVersion5AddsNullColumns(t *testing.T) {
 	dir := t.TempDir()
@@ -285,17 +290,17 @@ VALUES ('live', 's', 1, 98000, true, 50, 49, 1, 1, 600, 600, 5000, 2, 'f', '2026
 		}
 		withIndex(t, dir, func(db *sql.DB) {
 			ctx := t.Context()
-			if got := rowsOf(t, ctx, db, `SELECT version FROM schema_version`); got[0][0] != "5" {
-				t.Errorf("start %d: schema version %s, want 5", start+1, got[0][0])
+			if got := rowsOf(t, ctx, db, `SELECT version FROM schema_version`); got[0][0] != fmt.Sprint(SchemaVersion) {
+				t.Errorf("start %d: schema version %s, want %d", start+1, got[0][0], SchemaVersion)
 			}
-			if got := rowsOf(t, ctx, db, `SELECT * EXCLUDE (`+schema5Sessions+`) FROM sessions`); !slices.EqualFunc(got, before[0], slices.Equal) {
+			if got := rowsOf(t, ctx, db, `SELECT * EXCLUDE (`+schema5All+`) FROM sessions`); !slices.EqualFunc(got, before[0], slices.Equal) {
 				t.Errorf("start %d: sessions %q, want %q", start+1, got, before[0])
 			}
 			if got := rowsOf(t, ctx, db, `SELECT * EXCLUDE (`+schema5Laps+`) FROM laps`); !slices.EqualFunc(got, before[1], slices.Equal) {
 				t.Errorf("start %d: laps %q, want %q", start+1, got, before[1])
 			}
-			got := rowsOf(t, ctx, db, `SELECT `+schema5Sessions+`, l.pit_role, l.counts_for_best FROM sessions s JOIN laps l ON l.session_id = s.id`)
-			if want := [][]string{slices.Repeat([]string{"NULL"}, 8)}; !slices.EqualFunc(got, want, slices.Equal) {
+			got := rowsOf(t, ctx, db, `SELECT `+schema5All+`, l.pit_role, l.counts_for_best FROM sessions s JOIN laps l ON l.session_id = s.id`)
+			if want := [][]string{slices.Repeat([]string{"NULL"}, 14)}; !slices.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("start %d: new columns %q, want NULL", start+1, got)
 			}
 		})

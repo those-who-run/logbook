@@ -171,9 +171,9 @@ func TestTheBackfillFillsWhatWasStoredBefore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Every event of the three: the race's 3 laps, its end and its card, the
-		// other session's 3 laps and its end, and the 6 it cannot read.
-		want.Read = 15
+		// Every event it reads: the race's start, 3 laps, end and card, the other
+		// session's 3 laps and its end, and the 6 it cannot read.
+		want.Read = 16
 		if n := len(logs.find("backfill: event skipped", nil)); n != 6 {
 			t.Errorf("run %d: %d events skipped, want 6:\n%s", run+1, n, logs.String())
 		}
@@ -283,7 +283,7 @@ func TestTheBackfillGoesOnPastAnEmptyFetch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (BackfillCounts{Read: 5, Sessions: 1, Laps: 3, Cards: 1}); got != want {
+	if want := (BackfillCounts{Read: 6, Sessions: 1, Laps: 3, Cards: 1}); got != want {
 		t.Errorf("%+v, want %+v", got, want)
 	}
 	if n := len(logs.find("backfill: a fetch came back empty with events pending; fetching again", nil)); n != 3 {
@@ -295,5 +295,69 @@ func TestTheBackfillGoesOnPastAnEmptyFetch(t *testing.T) {
 	}
 	if got := indexRows(t, dir, schema5Sessions); !slices.EqualFunc(got, wantSchema5Sessions, slices.Equal) {
 		t.Errorf("sessions %q, want %q", got, wantSchema5Sessions)
+	}
+}
+
+// An open session's row keeps what its events say so far, as the subscriber reads
+// them (paddock#337): the start's joined lap and tank, the kind, the track, ecu's
+// best lap, the time paused, the gap of a continue and each pit stop. The
+// backfill applies the same events again to the same end.
+func TestAnOpenSessionKeepsItsFacts(t *testing.T) {
+	srv, js := testServer(t)
+	dir := t.TempDir()
+	in := start(t, testConfig(srv.ClientURL(), dir))
+	msgs := newRace("live", runA, sidA).messages()
+	msgs.started.JoinedOnLap, msgs.started.FuelCapacity = proto.Int32(1), 100
+	// The race without its end: the session stays open.
+	race := msgs.msgs[:len(msgs.msgs)-1]
+	at := time.Date(2026, 10, 15, 19, 35, 0, 0, time.UTC)
+	fact := func(what string, m proto.Message) published {
+		return published{subject: "twr.v1.live.evt." + sidA + "." + what, id: sidA + ":" + what + ":1", at: at, msg: m}
+	}
+	facts := []published{
+		fact("session.kind", &eventsv1.SessionKindChanged{SessionId: sidA, Kind: &eventsv1.SessionKind{
+			SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(3)}}),
+		fact("session.track", &eventsv1.SessionTrackChanged{SessionId: sidA, Track: &eventsv1.TrackVerdict{
+			TrackId: proto.Int32(350), Name: "Suzuka Circuit", Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED}}),
+		fact("session.paused", &eventsv1.SessionPaused{SessionId: sidA, PausedMs: 0}),
+		fact("session.resumed", &eventsv1.SessionResumed{SessionId: sidA, PauseMs: 2500, PausedMs: 2500}),
+		fact("lap.best", &eventsv1.LapBestChanged{SessionId: sidA, Lap: 1, LapTimeMs: 98_100, EndedLap: 1}),
+		fact("pit.exited", &eventsv1.PitExited{SessionId: sidA, Stop: &eventsv1.PitStop{Stop: 1, InLap: 1}}),
+		// Of a session never started: dropped.
+		{subject: "twr.v1.live.evt." + sidB + ".lap.best", id: sidB + ":lap.best:1", at: at,
+			msg: &eventsv1.LapBestChanged{SessionId: sidB, Lap: 1}},
+	}
+	publish(t, js, slices.Concat(race, facts), false)
+	in.logs.await(t, 6, "session fact kept", map[string]any{"session": sidA})
+	in.logs.await(t, 1, "event of a session never started; dropped", map[string]any{"session": sidB})
+	in.logs.await(t, len(msgs.laps)-1, "lap written", nil)
+	if err := in.stop(t); err != nil {
+		t.Fatal(err)
+	}
+	const q = `SELECT joined_on_lap, fuel_capacity, session_kind, total_laps, track_id, track_name, track_sure,
+    best_lap, best_lap_ms, paused_ms, pit_stops::VARCHAR FROM sessions`
+	want := [][]string{{"1", "100", "lap_race", "3", "350", "Suzuka Circuit", "true", "1", "98100", "2500",
+		`[{"stop":1,"inLap":1}]`}}
+	if got := indexRows(t, dir, q); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%q,\nwant %q", got, want)
+	}
+
+	s, err := store.Open(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Backfill(t.Context(), srv.ClientURL(), s, slog.New(slog.NewJSONHandler(newLogs(), nil)))
+	if cerr := s.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The start, its laps, the 6 facts and the one of a session never started.
+	if wantN := (BackfillCounts{Read: 1 + len(msgs.laps) + 7, Facts: 6}); got != wantN {
+		t.Errorf("backfill %+v, want %+v", got, wantN)
+	}
+	if got := indexRows(t, dir, q); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("after the backfill %q,\nwant %q", got, want)
 	}
 }

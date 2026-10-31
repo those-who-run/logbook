@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -367,8 +368,10 @@ func placeholders(n int) string {
 }
 
 // rowColumns are the columns scanRows reads, in its order.
-const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR, started_at, ended_at, type,
-    car_code, car_name, total_laps, laps_completed, started_fuel_at_start, posted_at, last_lap`
+const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR, posted_at, last_lap,
+    started_at, ended_at, kind_key, car_code, car_name, total_laps, laps_completed, started_fuel_at_start,
+    joined_on_lap, fuel_capacity, best_lap, best_lap_ms, paused_ms, gaps::VARCHAR, pit_stops::VARCHAR,
+    track_id, track_name, track_sure`
 
 // findSession is the session id from the first of sources, in their order, that
 // has it.
@@ -400,15 +403,16 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 	defer func() { err = errors.Join(err, rows.Close()) }()
 	for rows.Next() {
 		var (
-			r                                    storev1.SessionRow
-			endReason, summary, typ, carName     sql.NullString
-			startedAt                            time.Time
-			endedAt, postedAt                    sql.NullTime
-			carCode, totalLaps, lapsDone, lastLp sql.NullInt32
-			fuelAtStart                          sql.NullFloat64
+			r                  storev1.SessionRow
+			endReason, summary sql.NullString
+			postedAt           sql.NullTime
+			lastLap            sql.NullInt32
+			o                  openRow
 		)
-		if err := rows.Scan(&r.SessionId, &r.Source, &r.Closed, &endReason, &summary, &startedAt, &endedAt, &typ,
-			&carCode, &carName, &totalLaps, &lapsDone, &fuelAtStart, &postedAt, &lastLp); err != nil {
+		if err := rows.Scan(&r.SessionId, &r.Source, &r.Closed, &endReason, &summary, &postedAt, &lastLap,
+			&o.startedAt, &o.endedAt, &o.kind, &o.carCode, &o.carName, &o.totalLaps, &o.lapsDone, &o.fuelAtStart,
+			&o.joinedOnLap, &o.fuelCapacity, &o.bestLap, &o.bestLapMs, &o.pausedMs, &o.gaps, &o.pitStops,
+			&o.trackID, &o.trackName, &o.trackSure); err != nil {
 			return nil, err
 		}
 		if endReason.Valid {
@@ -421,42 +425,117 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 				return nil, fmt.Errorf("session %s/%s: its summary: %w", r.Source, r.SessionId, err)
 			}
 			r.Summary.Laps = nil
-		} else {
-			// No end, or one from before schema 5 the backfill has not reached: what
-			// the stored events say so far, and nothing else (twr.store.v1's
-			// SessionRow). logbook keeps SessionStarted's fields and its laps; the
-			// other events the contract names are not stored yet, so their fields are
-			// absent.
-			//
-			// TODO(paddock#122): fill the rest from schema 6's columns (migration 6,
-			// in its own PR on main): joined_on_lap, fuel_capacity, best_lap with
-			// best_lap_ms, paused_ms, gaps and pit_stops as JSON, and the track_*,
-			// session_kind and total_laps columns its event writers keep. This PR
-			// fills them once that one merges and is merged in here.
-			r.Summary = &eventsv1.SessionSummary{
-				StartedAt:     timestamppb.New(startedAt.UTC()),
-				SessionType:   eventsv1.SessionType(enumValue(eventsv1.SessionType_value, "SESSION_TYPE_", typ.String)),
-				CarCode:       carCode.Int32,
-				CarName:       carName.String,
-				LapsCompleted: lapsDone.Int32,
-				FuelAtStart:   fuelAtStart.Float64,
-			}
-			if totalLaps.Valid {
-				r.Summary.TotalLaps = proto.Int32(totalLaps.Int32)
-			}
-			if endedAt.Valid {
-				r.Summary.EndedAt = timestamppb.New(endedAt.Time.UTC())
-			}
+		} else if r.Summary, err = o.summary(); err != nil {
+			return nil, fmt.Errorf("session %s/%s: %w", r.Source, r.SessionId, err)
 		}
 		if postedAt.Valid {
 			r.CardPostedAt = timestamppb.New(postedAt.Time.UTC())
 		}
-		if lastLp.Valid {
-			r.LastLap = proto.Int32(lastLp.Int32)
+		if lastLap.Valid {
+			r.LastLap = proto.Int32(lastLap.Int32)
 		}
 		out = append(out, &r)
 	}
 	return out, rows.Err()
+}
+
+// openRow is the columns an open session's summary is made from: what its events
+// have said so far (schema 6, paddock#337).
+type openRow struct {
+	startedAt                                 time.Time
+	endedAt                                   sql.NullTime
+	kind, carName, gaps, pitStops, trackName  sql.NullString
+	carCode, totalLaps, lapsDone, joinedOnLap sql.NullInt32
+	bestLap, bestLapMs, pausedMs, trackID     sql.NullInt32
+	fuelAtStart, fuelCapacity                 sql.NullFloat64
+	trackSure                                 sql.NullBool
+}
+
+// summary is the summary of a session with no end, or one ended before schema 5
+// that the backfill has not reached: what its stored events say so far, and
+// nothing else (twr.store.v1's SessionRow):
+//
+//   - started_at, car_code, car_name, fuel_at_start, fuel_capacity and
+//     joined_on_lap from session.started;
+//   - session_type and total_laps from the last session.kind, else
+//     session.started's;
+//   - track from the last session.track, or a continue's carried track before
+//     one. logbook keeps whether it was sure, not its confidence: a sure track
+//     reads TRACK_CONFIDENCE_PROBABLE (at least probable), and one not sure
+//     TRACK_CONFIDENCE_AMBIGUOUS;
+//   - laps_completed, the complete laps stored;
+//   - best_lap and best_lap_time_ms from the last lap.best, absent before one;
+//   - paused_ms from session.paused and session.resumed;
+//   - gaps from each session.continued, and pit_stops from each pit.exited.
+//
+// ended_at is the end's time for a session ended before schema 5; every other
+// field is absent.
+func (o openRow) summary() (*eventsv1.SessionSummary, error) {
+	sum := &eventsv1.SessionSummary{
+		StartedAt:     timestamppb.New(o.startedAt.UTC()),
+		SessionType:   eventsv1.SessionType(enumValue(eventsv1.SessionType_value, "SESSION_TYPE_", o.kind.String)),
+		CarCode:       o.carCode.Int32,
+		CarName:       o.carName.String,
+		LapsCompleted: o.lapsDone.Int32,
+		FuelAtStart:   o.fuelAtStart.Float64,
+		FuelCapacity:  o.fuelCapacity.Float64,
+		PausedMs:      o.pausedMs.Int32,
+		TotalLaps:     optionalInt(o.totalLaps),
+		JoinedOnLap:   optionalInt(o.joinedOnLap),
+	}
+	if o.endedAt.Valid {
+		sum.EndedAt = timestamppb.New(o.endedAt.Time.UTC())
+	}
+	// best_lap_ms alone is the laps' quickest, which logbook works out; only ecu's
+	// own best (best_lap) is copied.
+	if o.bestLap.Valid {
+		sum.BestLap, sum.BestLapTimeMs = optionalInt(o.bestLap), optionalInt(o.bestLapMs)
+	}
+	if o.trackID.Valid || o.trackName.Valid || o.trackSure.Valid {
+		sum.Track = &eventsv1.TrackVerdict{TrackId: optionalInt(o.trackID), Name: o.trackName.String}
+		switch {
+		case !o.trackSure.Valid:
+		case o.trackSure.Bool:
+			sum.Track.Confidence = eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE
+		default:
+			sum.Track.Confidence = eventsv1.TrackConfidence_TRACK_CONFIDENCE_AMBIGUOUS
+		}
+	}
+	var err error
+	if sum.Gaps, err = protoList(o.gaps, func() *eventsv1.SessionGap { return &eventsv1.SessionGap{} }); err != nil {
+		return nil, fmt.Errorf("its gaps: %w", err)
+	}
+	if sum.PitStops, err = protoList(o.pitStops, func() *eventsv1.PitStop { return &eventsv1.PitStop{} }); err != nil {
+		return nil, fmt.Errorf("its pit stops: %w", err)
+	}
+	return sum, nil
+}
+
+func optionalInt(v sql.NullInt32) *int32 {
+	if !v.Valid {
+		return nil
+	}
+	return proto.Int32(v.Int32)
+}
+
+// protoList reads a JSON column holding an array of messages in protobuf JSON;
+// NULL is none.
+func protoList[M proto.Message](col sql.NullString, newM func() M) ([]M, error) {
+	if !col.Valid {
+		return nil, nil
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal([]byte(col.String), &raw); err != nil {
+		return nil, err
+	}
+	out := make([]M, len(raw))
+	for i, b := range raw {
+		out[i] = newM()
+		if err := protojson.Unmarshal(b, out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // enumValue is the number of an enum value stored by name (enumName): its name

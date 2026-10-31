@@ -148,7 +148,7 @@ func TestAV013DataDirectoryUpgradesInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	const (
-		sessions = `SELECT * EXCLUDE (` + newColumns + `, ` + schema5Sessions + `) FROM sessions ORDER BY src, id`
+		sessions = `SELECT * EXCLUDE (` + newColumns + `, ` + schema5All + `) FROM sessions ORDER BY src, id`
 		laps     = `SELECT * EXCLUDE (` + schema5Laps + `) FROM laps ORDER BY src, session_id, lap`
 		version  = `SELECT version FROM schema_version`
 	)

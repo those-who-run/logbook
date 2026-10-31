@@ -265,7 +265,70 @@ func TestGetSessionMapsWhatIsStored(t *testing.T) {
 		LastLap: proto.Int32(1),
 	}
 	if d := diff(want, got.GetSession()); d != "" {
-		t.Errorf("open session :\n%s", d)
+		t.Errorf("open session, its start and a lap:\n%s", d)
+	}
+
+	// What its events say from then on (schema 6): the kind, the track, the
+	// best lap, the pauses, a continue's gap and the pit stops.
+	gap := &eventsv1.SessionGap{StartedAt: timestamppb.New(day(4).Add(time.Minute)),
+		EndedAt: timestamppb.New(day(4).Add(2 * time.Minute)), Lap: 2, Reason: eventsv1.GapReason_GAP_REASON_ENGINEER_RESTART}
+	stops := []*eventsv1.PitStop{{Stop: 1, InLap: 1, FuelAdded: 20}, {Stop: 2, InLap: 3, OutLap: proto.Int32(4)}}
+	for _, ev := range []proto.Message{
+		&eventsv1.SessionKindChanged{SessionId: idOpen, Kind: &eventsv1.SessionKind{
+			SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(5)}},
+		&eventsv1.SessionTrackChanged{SessionId: idOpen, Track: &eventsv1.TrackVerdict{
+			TrackId: proto.Int32(10), Name: "Suzuka Circuit", Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED}},
+		&eventsv1.LapBestChanged{SessionId: idOpen, Lap: 1, LapTimeMs: 98_100},
+		&eventsv1.SessionPaused{SessionId: idOpen, PausedMs: 1500},
+		&eventsv1.SessionContinued{SessionId: idOpen, RunId: "r", Gap: gap},
+		&eventsv1.PitExited{SessionId: idOpen, Stop: stops[0]},
+		&eventsv1.PitExited{SessionId: idOpen, Stop: stops[1]},
+	} {
+		if _, err := s.ApplyFact(ctx, SourceLive, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err = s.GetSession(ctx, &storev1.GetSessionRequest{Sources: live, SessionId: idOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := want.GetSummary()
+	sum.SessionType, sum.TotalLaps = eventsv1.SessionType_SESSION_TYPE_LAP_RACE, proto.Int32(5)
+	// logbook keeps whether the track was sure, not its confidence.
+	sum.Track = &eventsv1.TrackVerdict{TrackId: proto.Int32(10), Name: "Suzuka Circuit",
+		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE}
+	sum.BestLap, sum.BestLapTimeMs, sum.PausedMs = proto.Int32(1), proto.Int32(98_100), 1500
+	sum.Gaps, sum.PitStops = []*eventsv1.SessionGap{gap}, stops
+	if d := diff(want, got.GetSession()); d != "" {
+		t.Errorf("open session, with its facts:\n%s", d)
+	}
+	// The kind and the track filters read the facts too.
+	list, err := s.ListSessions(ctx, &storev1.ListSessionsRequest{Sources: live, Track: proto.String("Suzuka Circuit"),
+		SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{idOpen, idSuzuka1}; !slices.Equal(ids(list.GetSessions()), want) {
+		t.Errorf("lap races at Suzuka: %q, want %q", ids(list.GetSessions()), want)
+	}
+}
+
+// A session started with what contracts' later SessionStarted carries: the lap
+// it was joined on and the tank's capacity.
+func TestAnOpenSessionKeepsItsStartsFacts(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race(SourceLive, sid)
+	sess.started.JoinedPartWay, sess.started.JoinedOnLap, sess.started.FuelCapacity = true, proto.Int32(7), 100
+	if err := s.StartSession(t.Context(), sess.started); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSession(t.Context(), &storev1.GetSessionRequest{Sources: live, SessionId: sid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum := got.GetSession().GetSummary(); sum.GetJoinedOnLap() != 7 || sum.GetFuelCapacity() != 100 || sum.BestLap != nil ||
+		sum.GetTrack() != nil || got.GetSession().LastLap != nil {
+		t.Errorf("joined on lap 7 with a 100 L tank: %v", got.GetSession())
 	}
 }
 
