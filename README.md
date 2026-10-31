@@ -37,7 +37,8 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **A migration is one-way.** A logbook that brings the index to a new schema
   version leaves it unreadable to the release before, which refuses it as
   newer. Before deploying a release that migrates (schema version 4 came with
-  paddock#76, and 5 with the schema 5 issue), stop logbook and copy
+  paddock#76, 5 with paddock#337's summary and 6 with its open-session
+  facts), stop logbook and copy
   `index.duckdb` (with `index.duckdb.wal`, if there is one) out of the data
   directory: [Schema 5](#schema-5-and-its-backfill) has the steps. Rolling back needs that
   copy put back: the sessions and laps written since are lost from the index,
@@ -106,6 +107,27 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   `counts_for_best` its own flag; both are null for an event with no pit role.
   logbook works none of them out: they are what ecu and podium publish. Each is
   null in a row written before schema 5 until the backfill fills it.
+- **An open session's facts** (schema 6, paddock#337), so the pit wall's open
+  session reads what ecu has said so far (paddock#122). Each column copies one
+  event while the session is open, and the end's summary replaces it:
+  - `joined_on_lap` and `fuel_capacity` from `session.started` (a capacity of
+    0, unset, is null);
+  - `track_id`, `track_name` and `track_sure` from the last `session.track`,
+    or a `session.continued`'s carried track while the session has none;
+  - `session_kind` and `total_laps` from the last `session.kind`'s kind;
+  - `best_lap` and `best_lap_ms` from the last `lap.best`. Once ecu has named
+    a best lap, a lap written later no longer works `best_lap_ms` out from the
+    laps;
+  - `paused_ms` from `session.paused` and `session.resumed`, the session's
+    time paused so far, which only grows, so a redelivery never takes it back;
+  - `gaps` (`JSON`, an array of `SessionGap`) from each `session.continued`'s
+    gap, and `pit_stops` (`JSON`, an array of `PitStop`) from each
+    `pit.exited`'s stop, a stop of the same number taking its copy's place.
+
+  At the end, `joined_on_lap` and `fuel_capacity` take the summary's where it
+  has them, and `best_lap`, `paused_ms`, `gaps` and `pit_stops` are the
+  summary's (`gaps` and `pit_stops` null when it lists none). Each is null in
+  a row written before schema 6 until the backfill fills it.
 - **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
   `seq` range that are in race, and the finished frame that closes a race. Each
   file's key-value metadata records `frame_schema_version`.
@@ -121,17 +143,21 @@ columns, ordered by session start and lap: what the parity harness compares.
 
 ## Schema 5 and its backfill
 
-`logbook backfill --data DIR [--nats URL]` fills schema 5's columns for what
-logbook stored before it. It opens the store, which migrates it, reads
-`session.ended`, `lap.completed` and `card.posted` back from `EVENTS` with an
-ephemeral ordered consumer, from the stream's first message to its last when
-the backfill began, and sets each column only where it is still null, on rows
-the store already holds. A fetch that comes back empty ends it only once the
-server has none of the three pending, and it gives up, exiting 1, after
-10 min. It adds no session, lap or lap file and changes no
-other column, so it is safe to run again: a second run changes nothing. It
-logs `backfill done` with the events read and the sessions, laps and cards it
-filled. `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
+`logbook backfill --data DIR [--nats URL]` fills schema 5's and 6's columns
+for what logbook stored before them. It opens the store, which migrates it, reads
+`session.started`, `session.ended`, `lap.completed` and `card.posted`, and
+an open session's events (`session.continued`, `session.kind`,
+`session.track`, `session.paused`, `session.resumed`, `lap.best` and
+`pit.exited`), back from `EVENTS` with an ephemeral ordered consumer, from the
+stream's first message to its last when the backfill began. It sets each
+column only where it is still null, on rows the store already holds; an open
+session's events it applies as the subscriber does, which changes nothing on
+a session that has ended. A fetch that comes back empty ends it only once the
+server has none of them pending, and it gives up, exiting 1, after 10 min.
+It adds no session, lap or lap file and changes no other column, so it is
+safe to run again: a second run leaves the store as it was. It logs
+`backfill done` with the events read, and the sessions, laps, cards and starts
+it filled and the open-session events it applied (`facts`). `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
 lock, so logbook must be stopped. `EVENTS` keeps 30 days, so a session whose
 events have aged out stays without them.
 
@@ -233,7 +259,10 @@ number of sessions in its store and its schema version.
   staged frames went at the end, so the lap's frames are read back from
   `TELEMETRY`; those the stream no longer holds are missing. Each event is
   acked after its write commits. `card.posted` sets the session's `posted_at`
-  at once, without waiting for the session's end. Any other type is acked and
+  at once, without waiting for the session's end, and an open session's
+  events (`session.kind`, `session.track`, `session.paused`,
+  `session.resumed`, `lap.best`, `pit.exited`, and `session.continued`'s gap
+  and track) set its facts at once, too. Any other type is acked and
   ignored. One that cannot be read, or a lap, end or card of a session never
   started, is dropped with a warning.
 - **Missing frames.** A lap whose frames stop coming is written after the

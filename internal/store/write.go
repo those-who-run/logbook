@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -29,8 +30,8 @@ func (s *Store) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) e
 	defer s.mu.Unlock()
 	_, err := s.index.ExecContext(ctx, `
 INSERT INTO sessions (src, id, started_at, type, car_code, total_laps, joined_part_way, first_seq,
-    started_fuel_at_start, car_name)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    started_fuel_at_start, car_name, joined_on_lap, fuel_capacity)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (src, id) DO UPDATE SET
     started_at = excluded.started_at,
     type = excluded.type,
@@ -39,11 +40,13 @@ ON CONFLICT (src, id) DO UPDATE SET
     joined_part_way = excluded.joined_part_way,
     first_seq = excluded.first_seq,
     started_fuel_at_start = excluded.started_fuel_at_start,
-    car_name = COALESCE(sessions.car_name, excluded.car_name)`,
+    car_name = COALESCE(sessions.car_name, excluded.car_name),
+    joined_on_lap = COALESCE(sessions.joined_on_lap, excluded.joined_on_lap),
+    fuel_capacity = COALESCE(sessions.fuel_capacity, excluded.fuel_capacity)`,
 		src, ev.GetSessionId(), ev.GetStartedAt().AsTime().UTC(),
 		enumName(ev.GetSessionType().String(), "SESSION_TYPE_"), ev.GetCarCode(),
 		optional(ev.TotalLaps), ev.GetJoinedPartWay(), int64(ev.GetFirstSeq()),
-		fuelAtStart(ev), textOrNull(ev.GetCarName()))
+		fuelAtStart(ev), textOrNull(ev.GetCarName()), optional(ev.JoinedOnLap), positiveOrNull(ev.GetFuelCapacity()))
 	if err != nil {
 		return fmt.Errorf("store: start session %s/%s: %w", src, ev.GetSessionId(), err)
 	}
@@ -175,18 +178,13 @@ UPDATE sessions SET
     ended_fuel_used = ?,
     ended_final_position = ?,
     session_kind = ?,
-    summary = ?,
-    car_name = COALESCE(?, car_name),
-    track_id = ?,
-    track_name = ?,
-    track_sure = ?
-WHERE src = ? AND id = ? AND ended_at IS NULL`,
-		endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
-		summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
-		optional(summary.FinishingPosition), src, ev.GetSessionId(),
-		ended[0], ended[1], ended[2], ended[3],
-		kept[0], kept[1], kept[2], kept[3], kept[4],
-		src, ev.GetSessionId())
+    `+summarySet+`
+WHERE src = ? AND id = ? AND ended_at IS NULL`, //nolint:gosec // a constant
+		slices.Concat([]any{endedAt.UTC(), enumName(ev.GetReason().String(), "END_REASON_"),
+			summary.GetLapsCompleted(), optional(summary.BestLapTimeMs),
+			optional(summary.FinishingPosition), src, ev.GetSessionId(),
+			ended[0], ended[1], ended[2], ended[3]},
+			kept, []any{src, ev.GetSessionId()})...)
 	if err != nil {
 		return fmt.Errorf("store: end session %s/%s: %w", src, ev.GetSessionId(), err)
 	}
@@ -363,14 +361,15 @@ ON CONFLICT (src, session_id, lap) DO UPDATE SET
 // at the first lap's start and the fuel all its laps used come from the laps
 // always. The complete laps and the best complete lap do only until the session
 // ends: from then on they are the summary's (EndSession), which a late or
-// redelivered lap must not overwrite.
+// redelivered lap must not overwrite. Once ecu has named a best lap (lap.best,
+// best_lap), best_lap_ms is its word, not the laps' minimum.
 func refreshSession(ctx context.Context, tx *sql.Tx, src, sessionID string) error {
 	_, err := tx.ExecContext(ctx, `
 UPDATE sessions SET
     laps_completed = CASE WHEN ended_at IS NULL
         THEN (SELECT count(*) FROM laps WHERE src = $1 AND session_id = $2 AND complete)
         ELSE laps_completed END,
-    best_lap_ms = CASE WHEN ended_at IS NULL
+    best_lap_ms = CASE WHEN ended_at IS NULL AND best_lap IS NULL
         THEN (SELECT min(lap_time_ms) FROM laps WHERE src = $1 AND session_id = $2 AND complete)
         ELSE best_lap_ms END,
     fuel_at_start = (SELECT fuel_start FROM laps WHERE src = $1 AND session_id = $2 ORDER BY lap LIMIT 1),

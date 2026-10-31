@@ -138,6 +138,23 @@ ALTER TABLE sessions ADD COLUMN posted_at TIMESTAMP;
 ALTER TABLE laps ADD COLUMN pit_role VARCHAR;
 ALTER TABLE laps ADD COLUMN counts_for_best BOOLEAN;
 `,
+	// 6: an open session's facts, what its events say so far (paddock#337), for the
+	// open session's summary (paddock#122): joined_on_lap and fuel_capacity from
+	// session.started; best_lap from lap.best, with best_lap_ms; paused_ms from
+	// session.paused and session.resumed; gaps (JSON, each a SessionGap) from
+	// session.continued; pit_stops (JSON, each a PitStop) from pit.exited. The
+	// track columns (5) also take session.track and a continue's carried track,
+	// and session_kind and total_laps session.kind, while the session is open. At
+	// the end, the summary's. Each is NULL in a row written before, until `logbook
+	// backfill` reads the events back from EVENTS.
+	`
+ALTER TABLE sessions ADD COLUMN joined_on_lap INTEGER;
+ALTER TABLE sessions ADD COLUMN fuel_capacity DOUBLE;
+ALTER TABLE sessions ADD COLUMN best_lap INTEGER;
+ALTER TABLE sessions ADD COLUMN paused_ms INTEGER;
+ALTER TABLE sessions ADD COLUMN gaps JSON;
+ALTER TABLE sessions ADD COLUMN pit_stops JSON;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

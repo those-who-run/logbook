@@ -10,12 +10,19 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-// summaryFields are the session columns schema 5 keeps from a session's summary:
-// summary, car_name, track_id, track_name and track_sure, in that order. The
-// summary is kept whole, as protobuf JSON; the others are its own fields, NULL
-// where it has none. An end with no summary leaves them all NULL.
-func summaryFields(sum *eventsv1.SessionSummary) ([5]driver.Value, error) {
-	var out [5]driver.Value
+// summarySet is the SET list of the session columns schema 5 keeps from a
+// session's summary, for summaryFields' values in its order. car_name,
+// joined_on_lap and fuel_capacity keep the start's where the summary has none.
+const summarySet = `summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?,
+    joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity), best_lap = ?,
+    paused_ms = ?, gaps = ?, pit_stops = ?`
+
+// summaryFields are the values of summarySet from a session's summary: the
+// summary kept whole, as protobuf JSON, then its own fields, NULL where it has
+// none, the gaps and pit stops as JSON arrays. An end with no summary leaves them
+// all NULL.
+func summaryFields(sum *eventsv1.SessionSummary) ([]any, error) {
+	out := make([]any, 11)
 	if sum == nil {
 		return out, nil
 	}
@@ -26,6 +33,14 @@ func summaryFields(sum *eventsv1.SessionSummary) ([5]driver.Value, error) {
 	out[0], out[1] = string(js), textOrNull(sum.GetCarName())
 	if t := sum.GetTrack(); t != nil {
 		out[2], out[3], out[4] = optional(t.TrackId), textOrNull(t.GetName()), trackSure(t.GetConfidence())
+	}
+	out[5], out[6], out[7] = optional(sum.JoinedOnLap), positiveOrNull(sum.GetFuelCapacity()), optional(sum.BestLap)
+	out[8] = sum.GetPausedMs()
+	if out[9], err = jsonArray(sum.GetGaps()); err != nil {
+		return out, err
+	}
+	if out[10], err = jsonArray(sum.GetPitStops()); err != nil {
+		return out, err
 	}
 	return out, nil
 }
@@ -94,7 +109,7 @@ UPDATE sessions SET posted_at = COALESCE(posted_at, ?) WHERE src = ? AND id = ?`
 }
 
 // BackfillSummary keeps ev's summary on a session stored before schema 5: its
-// summary, car_name and track columns, only where summary is still NULL, so the
+// summary and the columns taken from it (summarySet), only where summary is still NULL, so the
 // first end's summary stays and a second run changes nothing. It changes no other
 // column. It says whether the row changed; a session the index does not hold is
 // skipped.
@@ -109,10 +124,9 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return changed(s.index.ExecContext(ctx, `
-UPDATE sessions SET summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?
-WHERE src = ? AND id = ? AND summary IS NULL`,
-		kept[0], kept[1], kept[2], kept[3], kept[4], src, ev.GetSessionId()))
+	return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+summarySet+`
+WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
+		append(kept, src, ev.GetSessionId())...))
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema
