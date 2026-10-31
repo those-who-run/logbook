@@ -153,32 +153,17 @@ SELECT src, id, summary::VARCHAR FROM sessions WHERE summary IS NOT NULL AND pau
 	}
 	type stored struct{ src, id, summary string }
 	var todo []stored
-	for rows.Next() {
+	for err == nil && rows.Next() {
 		var r stored
-		if err := rows.Scan(&r.src, &r.id, &r.summary); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("store: stored summaries: %w", err)
-		}
+		err = rows.Scan(&r.src, &r.id, &r.summary)
 		todo = append(todo, r)
 	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+	if err = errors.Join(err, rows.Err(), rows.Close()); err != nil {
 		return 0, fmt.Errorf("store: stored summaries: %w", err)
 	}
 	for _, r := range todo {
-		var sum eventsv1.SessionSummary
-		if err := protojson.Unmarshal([]byte(r.summary), &sum); err != nil {
+		if err := s.fillFromSummary(ctx, r.src, r.id, r.summary); err != nil {
 			return n, fmt.Errorf("store: the summary of %s/%s: %w", r.src, r.id, err)
-		}
-		kept, err := summaryFields(&sum)
-		if err != nil {
-			return n, fmt.Errorf("store: the summary of %s/%s: %w", r.src, r.id, err)
-		}
-		if _, err := s.index.ExecContext(ctx, `
-UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
-    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
-WHERE src = ? AND id = ? AND paused_ms IS NULL`,
-			append(kept[5:], r.src, r.id)...); err != nil {
-			return n, fmt.Errorf("store: fill %s/%s: %w", r.src, r.id, err)
 		}
 		n++
 	}
@@ -230,4 +215,23 @@ func changed(res sql.Result, err error) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// fillFromSummary sets schema 6's columns of one session from its stored summary.
+// The caller holds s.mu.
+func (s *Store) fillFromSummary(ctx context.Context, src, id, summary string) error {
+	var sum eventsv1.SessionSummary
+	err := protojson.Unmarshal([]byte(summary), &sum)
+	var kept []any
+	if err == nil {
+		kept, err = summaryFields(&sum)
+	}
+	if err == nil {
+		_, err = s.index.ExecContext(ctx, `
+UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
+    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
+WHERE src = ? AND id = ? AND paused_ms IS NULL`,
+			append(kept[5:], src, id)...)
+	}
+	return err
 }
