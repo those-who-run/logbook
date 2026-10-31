@@ -91,9 +91,10 @@ func (s *Store) writeLap(ctx context.Context, src string, lap *eventsv1.LapCompl
 
 // fuelAtStart is ev's fuel on the session's first frame, or NULL for an event from
 // before contracts v0.1.4, which has none. proto3 sends no zero, so a 0 is told
-// apart by the session type: the types ecu sends from v0.1.4 on (LAP_RACE to
-// SOLO_TIMED) are new in v0.1.4, so with one of them a 0 is a real empty tank, and
-// with any other it is an event that carries no start fuel.
+// apart by the session type: the types ecu sends from v0.1.4 on (LAP_RACE and
+// after, RANKED from v0.2.7 included) are newer than v0.1.3, so with one of them a
+// 0 is a real empty tank, and with any other it is an event that carries no
+// start fuel.
 func fuelAtStart(ev *eventsv1.SessionStarted) driver.Value {
 	if ev.GetFuelAtStart() == 0 && !fromV014(ev.GetSessionType()) {
 		return nil
@@ -101,9 +102,10 @@ func fuelAtStart(ev *eventsv1.SessionStarted) driver.Value {
 	return ev.GetFuelAtStart()
 }
 
-// fromV014 says whether t is one of the session types contracts v0.1.4 added.
+// fromV014 says whether t is one of the session types contracts v0.1.4 added, or
+// a later one (SESSION_TYPE_RANKED, v0.2.7): every value from LAP_RACE on.
 func fromV014(t eventsv1.SessionType) bool {
-	return t >= eventsv1.SessionType_SESSION_TYPE_LAP_RACE && t <= eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED
+	return t >= eventsv1.SessionType_SESSION_TYPE_LAP_RACE
 }
 
 // endedFields are the columns of ev's own summary fields that contracts v0.1.4

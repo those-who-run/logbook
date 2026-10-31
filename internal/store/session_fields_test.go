@@ -73,6 +73,8 @@ func TestTheNewEndReasonsAndSessionTypesAreStoredByName(t *testing.T) {
 		{eventsv1.EndReason_END_REASON_RESTARTED, eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS, "restarted", "solo_laps"},
 		{eventsv1.EndReason_END_REASON_NEXT_SESSION_STARTED, eventsv1.SessionType_SESSION_TYPE_TIMED_FIELD, "next_session_started", "timed_field"},
 		{eventsv1.EndReason_END_REASON_INPUT_ENDED, eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, "input_ended", "solo_timed"},
+		// contracts v0.2.7's ranked kind, by name, not "9".
+		{eventsv1.EndReason_END_REASON_QUIT, eventsv1.SessionType_SESSION_TYPE_RANKED, "quit", "ranked"},
 	}
 	var want [][]string
 	for i, c := range cases {
@@ -101,6 +103,7 @@ func TestAStartFuelOf0IsKeptOnlyFromAV014Event(t *testing.T) {
 	}{
 		{eventsv1.SessionType_SESSION_TYPE_LAP_RACE, "0"},
 		{eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, "0"},
+		{eventsv1.SessionType_SESSION_TYPE_RANKED, "0"},
 		{eventsv1.SessionType_SESSION_TYPE_RACE, "NULL"},
 		{eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED, "NULL"},
 	}
