@@ -338,3 +338,38 @@ func TestAnOlderEventDeliveredAgainChangesNothing(t *testing.T) {
 		t.Errorf("%q, want %q", got, want)
 	}
 }
+
+// A message protobuf JSON cannot hold (a string that is not UTF-8, which only a
+// message built in Go can carry) is refused, and changes nothing.
+func TestAFactThatIsNotJSONIsRefused(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race("live", sid)
+	if err := s.StartSession(t.Context(), sess.started); err != nil {
+		t.Fatal(err)
+	}
+	bad := "\xff"
+	for name, ev := range map[string]proto.Message{
+		"a kind":          &eventsv1.SessionKindChanged{SessionId: sid, Kind: &eventsv1.SessionKind{Evidence: bad}},
+		"a track":         &eventsv1.SessionTrackChanged{SessionId: sid, Track: &eventsv1.TrackVerdict{Name: bad}},
+		"a carried track": &eventsv1.SessionContinued{SessionId: sid, Track: &eventsv1.TrackVerdict{Name: bad}},
+		"a pit stop":      &eventsv1.PitExited{SessionId: sid, Stop: &eventsv1.PitStop{Evidence: bad}},
+	} {
+		if _, err := s.ApplyFact(t.Context(), "live", ev, 1); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+	for name, sum := range map[string]*eventsv1.SessionSummary{
+		"a car name": {CarName: bad},
+		"a pit stop": {PitStops: []*eventsv1.PitStop{{Evidence: bad}}},
+		"a kind":     {Kind: &eventsv1.SessionKind{Evidence: bad}},
+		"a track":    {Track: &eventsv1.TrackVerdict{Evidence: bad}},
+	} {
+		if _, err := summaryFields(sum); err == nil {
+			t.Errorf("a summary with %s: no error", name)
+		}
+	}
+	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5All+` FROM sessions`)
+	if want := [][]string{slices.Repeat([]string{"NULL"}, 18)}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%q, want NULL", got)
+	}
+}
