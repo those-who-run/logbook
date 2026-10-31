@@ -38,7 +38,7 @@ type backfillStore interface {
 	BackfillLap(ctx context.Context, src string, lap *eventsv1.LapCompleted) (bool, error)
 	BackfillPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) (bool, error)
 	BackfillStarted(ctx context.Context, src string, ev *eventsv1.SessionStarted) (bool, error)
-	ApplyFact(ctx context.Context, src string, ev proto.Message) (bool, error)
+	ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error)
 }
 
 // BackfillCounts is what a backfill read and changed.
@@ -245,7 +245,7 @@ func backfillOne(ctx context.Context, st backfillStore, m jetstream.Msg, n *Back
 		}
 		// Of a session that has ended, the summary has the last word and this
 		// changes nothing; of one the store does not hold, it is skipped.
-		did, err = st.ApplyFact(ctx, src, ev)
+		did, err = st.ApplyFact(ctx, src, ev, streamSeq(m))
 		if errors.Is(err, store.ErrUnknownSession) {
 			did, err = false, nil
 		}

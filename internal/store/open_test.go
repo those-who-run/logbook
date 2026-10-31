@@ -14,14 +14,20 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// factSeq is the EVENTS sequence apply gives its next event.
+var factSeq uint64 = 100
+
 // openFacts reads an open session's fact columns (paddock#337).
 const openFacts = `SELECT joined_on_lap, fuel_capacity, session_kind, total_laps, track_id, track_name, track_sure,
     best_lap, best_lap_ms, paused_ms FROM sessions WHERE id = ?`
 
+// apply applies evs in order, as EVENTS would deliver them: each at the next
+// sequence.
 func apply(t *testing.T, s *Store, evs ...proto.Message) {
 	t.Helper()
 	for _, ev := range evs {
-		if _, err := s.ApplyFact(t.Context(), "live", ev); err != nil {
+		factSeq++
+		if _, err := s.ApplyFact(t.Context(), "live", ev, factSeq); err != nil {
 			t.Fatalf("%T: %v", ev, err)
 		}
 	}
@@ -115,7 +121,7 @@ func TestAnOpenSessionKeepsWhatItsEventsSay(t *testing.T) {
 		t.Errorf("gaps %v after an end that lists none", gaps)
 	}
 	// After the end an event changes nothing.
-	did, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: sid, Lap: 2, LapTimeMs: 1})
+	did, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: sid, Lap: 2, LapTimeMs: 1}, 1_000_000)
 	if did || err != nil {
 		t.Errorf("a fact after the end: %v, %v", did, err)
 	}
@@ -142,19 +148,19 @@ func TestACarriedTrackIsTakenWhileThereIsNone(t *testing.T) {
 // a message that is not one of its events.
 func TestApplyFactRefusesWhatItCannotUse(t *testing.T) {
 	s := open(t, t.TempDir())
-	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: sid}); !errors.Is(err, ErrUnknownSession) {
+	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: sid}, 1); !errors.Is(err, ErrUnknownSession) {
 		t.Errorf("an unknown session: %v, want ErrUnknownSession", err)
 	}
-	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: "x"}); err == nil {
+	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapBestChanged{SessionId: "x"}, 1); err == nil {
 		t.Error("a bad session id: no error")
 	}
 	if err := s.StartSession(t.Context(), race("live", sid).started); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapCompleted{SessionId: sid}); err == nil {
+	if _, err := s.ApplyFact(t.Context(), "live", &eventsv1.LapCompleted{SessionId: sid}, 1); err == nil {
 		t.Error("a lap.completed: no error")
 	}
-	if _, err := s.ApplyFact(t.Context(), "live", &timestamppb.Timestamp{}); err == nil {
+	if _, err := s.ApplyFact(t.Context(), "live", &timestamppb.Timestamp{}, 1); err == nil {
 		t.Error("a message with no session: no error")
 	}
 }
@@ -249,6 +255,86 @@ func TestTheBackfillFillsSchema6OnASessionEndedAt5(t *testing.T) {
 	}
 	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5Open+` FROM sessions`)
 	if want := [][]string{{"NULL", "90", "1", "1500", "NULL", `[{"inLap":2,"stop":1}]`}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%q, want %q", got, want)
+	}
+}
+
+// The kind and the track are kept whole as JSON, with the label the track filter
+// keys on; the end's summary replaces them.
+func TestTheKindAndTrackAreKeptWhole(t *testing.T) {
+	s := open(t, t.TempDir())
+	sess := race("live", sid)
+	if err := s.StartSession(t.Context(), sess.started); err != nil {
+		t.Fatal(err)
+	}
+	kind := &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(5),
+		Field: true, FuelUse: eventsv1.FuelUse_FUEL_USE_OFF, CarsOnTrack: true, Start: eventsv1.StartType_START_TYPE_GRID,
+		Evidence: "a lap total and a field"}
+	track := &eventsv1.TrackVerdict{TrackId: proto.Int32(7), Name: "Suzuka Circuit", Family: "Suzuka",
+		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_AMBIGUOUS, Evidence: "two layouts", Carried: true}
+	apply(t, s, &eventsv1.SessionKindChanged{SessionId: sid, Kind: kind},
+		&eventsv1.SessionTrackChanged{SessionId: sid, Track: track})
+	check := func(when string, kind *eventsv1.SessionKind, track *eventsv1.TrackVerdict, label string) {
+		t.Helper()
+		got := rowsOf(t, t.Context(), s.index, `SELECT kind::VARCHAR, track::VARCHAR, track_label FROM sessions`)
+		var k eventsv1.SessionKind
+		var v eventsv1.TrackVerdict
+		if err := errors.Join(protojson.Unmarshal([]byte(got[0][0]), &k), protojson.Unmarshal([]byte(got[0][1]), &v)); err != nil {
+			t.Fatalf("%s: %q: %v", when, got, err)
+		}
+		if !proto.Equal(&k, kind) || !proto.Equal(&v, track) || got[0][2] != label {
+			t.Errorf("%s: kind %v, track %v, label %q; want %v, %v, %q", when, &k, &v, got[0][2], kind, track, label)
+		}
+	}
+	// Not sure of the layout: the label is the circuit's family.
+	check("open", kind, track, "Suzuka")
+	sure := &eventsv1.TrackVerdict{TrackId: proto.Int32(8), Name: "Suzuka East", Family: "Suzuka",
+		Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_CONFIRMED}
+	endKind := &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_SOLO_LAPS}
+	sess.ended.Summary.Track, sess.ended.Summary.Kind = sure, endKind
+	sess.write(t, s)
+	check("ended", endKind, sure, "Suzuka East")
+}
+
+// The track, the kind and the best lap are the last event's: an older event
+// delivered again after a newer one changes nothing.
+func TestAnOlderEventDeliveredAgainChangesNothing(t *testing.T) {
+	s := open(t, t.TempDir())
+	if err := s.StartSession(t.Context(), race("live", sid).started); err != nil {
+		t.Fatal(err)
+	}
+	at := func(seq uint64, ev proto.Message) {
+		t.Helper()
+		if _, err := s.ApplyFact(t.Context(), "live", ev, seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	track := func(name string) *eventsv1.SessionTrackChanged {
+		return &eventsv1.SessionTrackChanged{SessionId: sid, Track: &eventsv1.TrackVerdict{Name: name,
+			Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_PROBABLE}}
+	}
+	kind := func(laps int32) *eventsv1.SessionKindChanged {
+		return &eventsv1.SessionKindChanged{SessionId: sid, Kind: &eventsv1.SessionKind{
+			SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(laps)}}
+	}
+	best := func(lap int32) *eventsv1.LapBestChanged {
+		return &eventsv1.LapBestChanged{SessionId: sid, Lap: lap, LapTimeMs: 90_000 + lap}
+	}
+	// In order, then the older ones again.
+	at(10, track("old"))
+	at(11, kind(3))
+	at(12, best(1))
+	at(20, track("new"))
+	at(21, kind(5))
+	at(22, best(2))
+	at(10, track("old"))
+	at(11, kind(3))
+	at(12, best(1))
+	// A continue's carried track does not replace one there is, whatever its sequence.
+	at(30, &eventsv1.SessionContinued{SessionId: sid, RunId: "r", Track: &eventsv1.TrackVerdict{Name: "carried"}})
+	got := rowsOf(t, t.Context(), s.index, `SELECT track_name, track_label, total_laps, best_lap, best_lap_ms,
+    track_seq, kind_seq, best_seq FROM sessions`)
+	if want := [][]string{{"new", "new", "5", "2", "90002", "20", "21", "22"}}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("%q, want %q", got, want)
 	}
 }

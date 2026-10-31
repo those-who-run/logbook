@@ -9,30 +9,36 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/those-who-run/contracts/format"
 	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
 // ApplyFact copies what one of a session's events says into its row while the
-// session is open (paddock#337), for the open session's summary (paddock#122). It
-// takes:
+// session is open (paddock#337), for the open session's summary (paddock#122).
+// seq is the event's sequence in EVENTS. It takes:
 //
-//   - SessionKindChanged: session_kind and total_laps, from its kind;
-//   - SessionTrackChanged: track_id, track_name and track_sure;
+//   - SessionKindChanged: kind (the SessionKind, protobuf JSON), session_kind and
+//     total_laps;
+//   - SessionTrackChanged: track (the TrackVerdict, protobuf JSON), track_id,
+//     track_name, track_sure and track_label;
 //   - SessionContinued: its gap, added to gaps, and its carried track while the
-//     session has none yet;
+//     session has none yet (track NULL);
 //   - SessionPaused and SessionResumed: paused_ms, the session's time paused so
 //     far, which only grows, so a redelivery never takes it back;
 //   - LapBestChanged: best_lap and best_lap_ms;
 //   - PitExited: its stop, added to pit_stops, or put in place of the stop of the
 //     same number.
 //
-// It copies ecu's facts and works nothing out. Once the session has ended its
-// summary has the last word, and an event changes nothing. It says whether the
-// row changed; a session the index does not hold is ErrUnknownSession, and any
-// other message an error.
-func (s *Store) ApplyFact(ctx context.Context, src string, ev proto.Message) (bool, error) {
+// The track, the kind and the best lap are the last event's: each group keeps the
+// sequence that set it (track_seq, kind_seq, best_seq), and an event of a lower
+// one, an older event delivered again after a newer, changes nothing. It copies
+// ecu's facts and works nothing out. Once the session has ended its summary has
+// the last word, and an event changes nothing. It says whether the row changed; a
+// session the index does not hold is ErrUnknownSession, and any other message an
+// error.
+func (s *Store) ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error) {
 	src = sourceOf(src)
 	id, err := factSession(ev)
 	if err != nil {
@@ -46,27 +52,37 @@ func (s *Store) ApplyFact(ctx context.Context, src string, ev proto.Message) (bo
 	if err := s.sessionExists(ctx, src, id); err != nil {
 		return false, err
 	}
-	exec := func(set string, args ...any) (bool, error) {
+	// exec updates the open session's row, where cond holds as well: args are
+	// set's values, then cond's.
+	exec := func(set, cond string, args ...any) (bool, error) {
 		return changed(s.index.ExecContext(ctx, `UPDATE sessions SET `+set+ //nolint:gosec // constant SQL
-			` WHERE src = ? AND id = ? AND ended_at IS NULL`, append(args, src, id)...))
+			` WHERE `+cond+` AND src = ? AND id = ? AND ended_at IS NULL`, append(args, src, id)...))
 	}
+	n := int64(seq) //nolint:gosec // a stream sequence is far below 2^63
 	switch ev := ev.(type) {
 	case *eventsv1.SessionKindChanged:
 		k := ev.GetKind()
-		return exec(`session_kind = ?, total_laps = ?`,
-			enumName(k.GetSessionType().String(), "SESSION_TYPE_"), optional(k.TotalLaps))
+		js, err := jsonOf(k)
+		if err != nil {
+			return false, err
+		}
+		return exec(`kind = ?, session_kind = ?, total_laps = ?, kind_seq = ?`, `COALESCE(kind_seq, 0) < ?`,
+			js, enumName(k.GetSessionType().String(), "SESSION_TYPE_"), optional(k.TotalLaps), n, n)
 	case *eventsv1.SessionTrackChanged:
-		t := ev.GetTrack()
-		return exec(`track_id = ?, track_name = ?, track_sure = ?`,
-			optional(t.TrackId), textOrNull(t.GetName()), trackSure(t.GetConfidence()))
+		set, args, err := trackSet(ev.GetTrack())
+		if err != nil {
+			return false, err
+		}
+		return exec(set+`, track_seq = ?`, `COALESCE(track_seq, 0) < ?`, append(args, n, n)...)
 	case *eventsv1.SessionContinued:
-		return s.continuedFacts(ctx, src, id, ev, exec)
+		return s.continuedFacts(ctx, src, id, ev, n, exec)
 	case *eventsv1.SessionPaused:
-		return exec(`paused_ms = greatest(COALESCE(paused_ms, 0), ?)`, ev.GetPausedMs())
+		return exec(`paused_ms = greatest(COALESCE(paused_ms, 0), ?)`, `true`, ev.GetPausedMs())
 	case *eventsv1.SessionResumed:
-		return exec(`paused_ms = greatest(COALESCE(paused_ms, 0), ?)`, ev.GetPausedMs())
+		return exec(`paused_ms = greatest(COALESCE(paused_ms, 0), ?)`, `true`, ev.GetPausedMs())
 	case *eventsv1.LapBestChanged:
-		return exec(`best_lap = ?, best_lap_ms = ?`, ev.GetLap(), ev.GetLapTimeMs())
+		return exec(`best_lap = ?, best_lap_ms = ?, best_seq = ?`, `COALESCE(best_seq, 0) < ?`,
+			ev.GetLap(), ev.GetLapTimeMs(), n, n)
 	case *eventsv1.PitExited:
 		if ev.GetStop() == nil {
 			return false, nil
@@ -79,16 +95,52 @@ func (s *Store) ApplyFact(ctx context.Context, src string, ev proto.Message) (bo
 		if err != nil {
 			return false, err
 		}
-		return exec(`pit_stops = ?`, list)
+		return exec(`pit_stops = ?`, `true`, list)
 	}
 	return false, fmt.Errorf("store: %T is not a session fact", ev)
+}
+
+// trackSet is the SET list and its values for a track verdict: the verdict whole,
+// and the columns the filters read.
+func trackSet(t *eventsv1.TrackVerdict) (string, []any, error) {
+	js, err := jsonOf(t)
+	if err != nil {
+		return "", nil, err
+	}
+	return `track = ?, track_id = ?, track_name = ?, track_sure = ?, track_label = ?`,
+		[]any{js, optional(t.TrackId), textOrNull(t.GetName()), trackSure(t.GetConfidence()), trackLabel(t)}, nil
+}
+
+// trackLabel is a verdict's label as the pit wall and the card name the track
+// (contracts' format.TrackLabel), NULL for no verdict.
+func trackLabel(t *eventsv1.TrackVerdict) driver.Value {
+	if t == nil {
+		return nil
+	}
+	return format.TrackLabel(t)
+}
+
+// jsonOf is m as protobuf JSON, NULL for none.
+func jsonOf[M interface {
+	proto.Message
+	comparable
+}](m M) (driver.Value, error) {
+	var zero M
+	if m == zero {
+		return nil, nil
+	}
+	js, err := protojson.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return string(js), nil
 }
 
 // continuedFacts adds a SessionContinued's gap to the session's gaps, a gap of the
 // same lap and start replacing its copy, and takes its carried track while the
 // session has none.
-func (s *Store) continuedFacts(ctx context.Context, src, id string, ev *eventsv1.SessionContinued,
-	exec func(string, ...any) (bool, error),
+func (s *Store) continuedFacts(ctx context.Context, src, id string, ev *eventsv1.SessionContinued, n int64,
+	exec func(string, string, ...any) (bool, error),
 ) (bool, error) {
 	did := false
 	if g := ev.GetGap(); g != nil {
@@ -102,16 +154,17 @@ func (s *Store) continuedFacts(ctx context.Context, src, id string, ev *eventsv1
 		if err != nil {
 			return false, err
 		}
-		if did, err = exec(`gaps = ?`, list); err != nil {
+		if did, err = exec(`gaps = ?`, `true`, list); err != nil {
 			return false, err
 		}
 	}
 	if t := ev.GetTrack(); t != nil {
 		// Only before a track of its own: one there is stays.
-		took, err := exec(`track_id = CASE WHEN track_sure IS NULL AND track_name IS NULL THEN ? ELSE track_id END,
-    track_name = CASE WHEN track_sure IS NULL AND track_name IS NULL THEN ? ELSE track_name END,
-    track_sure = CASE WHEN track_sure IS NULL AND track_name IS NULL THEN ? ELSE track_sure END`,
-			optional(t.TrackId), textOrNull(t.GetName()), trackSure(t.GetConfidence()))
+		set, args, err := trackSet(t)
+		if err != nil {
+			return false, err
+		}
+		took, err := exec(set+`, track_seq = ?`, `track IS NULL`, append(args, n)...)
 		if err != nil {
 			return false, err
 		}

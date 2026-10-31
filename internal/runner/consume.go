@@ -36,7 +36,7 @@ type storeAPI interface {
 	EndSession(ctx context.Context, src string, ev *eventsv1.SessionEnded, endedAt time.Time) error
 	DropStaged(ctx context.Context, src, sessionID string) error
 	MarkPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) error
-	ApplyFact(ctx context.Context, src string, ev proto.Message) (bool, error)
+	ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error)
 }
 
 // storeError is a write the store could not make. It stops the runner, unacked, so
@@ -801,10 +801,13 @@ func (c *consumer) continued(ctx context.Context, src string, ev *eventsv1.Sessi
 	}
 	k := store.Continuation{Run: ev.GetRunId(), FromSeq: ev.GetAt(), FromLap: max(ev.GetGap().GetLap(), 1),
 		At: at.UTC().Truncate(time.Microsecond)}
-	if err := c.st.ContinueSession(ctx, src, ev.GetSessionId(), k); err != nil {
+	// Its gap and carried track before the run: a stop between the two leaves
+	// the continue unrecorded, so it comes again and both are applied again,
+	// which changes nothing the second time.
+	if _, err := c.st.ApplyFact(ctx, src, ev, streamSeq(m)); err != nil {
 		return storeError{err}
 	}
-	if _, err := c.st.ApplyFact(ctx, src, ev); err != nil {
+	if err := c.st.ContinueSession(ctx, src, ev.GetSessionId(), k); err != nil {
 		return storeError{err}
 	}
 	s.legs = append(s.legs, &leg{run: k.Run, from: k.FromSeq, lap: k.FromLap, at: k.At, readBack: true, high: -1})
@@ -869,7 +872,7 @@ func (c *consumer) fact(ctx context.Context, src string, ev proto.Message, m jet
 	if err := store.CheckKey(src, id); err != nil {
 		return c.drop(ctx, m, err)
 	}
-	_, err := c.st.ApplyFact(ctx, src, ev)
+	_, err := c.st.ApplyFact(ctx, src, ev, streamSeq(m))
 	if errors.Is(err, store.ErrUnknownSession) {
 		c.log.WarnContext(ctx, "event of a session never started; dropped", "subject", m.Subject(), "session", id)
 		return term(m)
@@ -1209,4 +1212,15 @@ func eventSource(subject string) (string, bool) {
 func runOf(id string) string {
 	run, _, _ := strings.Cut(id, ":frame:")
 	return run
+}
+
+// streamSeq is m's sequence in its stream, which orders the events of a session:
+// 0 when the message has no metadata, which only a message not from JetStream
+// lacks.
+func streamSeq(m jetstream.Msg) uint64 {
+	md, err := m.Metadata()
+	if err != nil {
+		return 0
+	}
+	return md.Sequence.Stream
 }

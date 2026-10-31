@@ -16,14 +16,14 @@ import (
 // joined_on_lap and fuel_capacity keep the start's where the summary has none.
 const summarySet = `summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?,
     joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity), best_lap = ?,
-    paused_ms = ?, gaps = ?, pit_stops = ?`
+    paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?`
 
 // summaryFields are the values of summarySet from a session's summary: the
 // summary kept whole, as protobuf JSON, then its own fields, NULL where it has
 // none, the gaps and pit stops as JSON arrays. An end with no summary leaves them
 // all NULL.
 func summaryFields(sum *eventsv1.SessionSummary) ([]any, error) {
-	out := make([]any, 11)
+	out := make([]any, 14)
 	if sum == nil {
 		return out, nil
 	}
@@ -43,6 +43,13 @@ func summaryFields(sum *eventsv1.SessionSummary) ([]any, error) {
 	if out[10], err = jsonArray(sum.GetPitStops()); err != nil {
 		return out, err
 	}
+	if out[11], err = jsonOf(sum.GetKind()); err != nil {
+		return out, err
+	}
+	if out[12], err = jsonOf(sum.GetTrack()); err != nil {
+		return out, err
+	}
+	out[13] = trackLabel(sum.GetTrack())
 	return out, nil
 }
 
@@ -135,9 +142,9 @@ WHERE src = ? AND id = ? AND summary IS NULL`, //nolint:gosec // a constant
 	}
 	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET joined_on_lap = COALESCE(?, joined_on_lap), fuel_capacity = COALESCE(?, fuel_capacity),
-    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?
+    best_lap = ?, paused_ms = ?, gaps = ?, pit_stops = ?, kind = ?, track = ?, track_label = ?
 WHERE src = ? AND id = ? AND summary IS NOT NULL AND paused_ms IS NULL`,
-		kept[5], kept[6], kept[7], kept[8], kept[9], kept[10], src, ev.GetSessionId()))
+		append(slices.Clone(kept[5:]), src, ev.GetSessionId())...))
 }
 
 // BackfillLap sets pit_role and counts_for_best on a lap row stored before schema
