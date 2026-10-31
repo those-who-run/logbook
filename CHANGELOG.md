@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/those-who-run/logbook/compare/v0.1.6...v0.1.7) (2026-10-31)
+
+
+### Features
+
+* **logbook:** schema 5, keep ecu's summary, the lap pit roles and card.posted, with a backfill ([#27](https://github.com/those-who-run/logbook/issues/27)) ([8dc6bba](https://github.com/those-who-run/logbook/commit/8dc6bba4a80478c82eec979328b2987f9e7ba56f))
+* **logbook:** schema 6, an open session's facts as its events say them ([#32](https://github.com/those-who-run/logbook/issues/32)) ([e0c8cf3](https://github.com/those-who-run/logbook/commit/e0c8cf31fe53ddb767d3b514f8f98cba02a42718))
+* **logbook:** serve sessions, laps, same-track sessions and lap traces ([#30](https://github.com/those-who-run/logbook/issues/30)) ([64d1572](https://github.com/those-who-run/logbook/commit/64d1572e93706832b2f9a8faf9eec9c2c57eacc1))
+
 ## [0.1.6](https://github.com/those-who-run/logbook/compare/v0.1.5...v0.1.6) (2026-10-31)
 
 
