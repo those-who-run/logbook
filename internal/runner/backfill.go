@@ -39,6 +39,7 @@ type backfillStore interface {
 	BackfillPosted(ctx context.Context, src string, ev *eventsv1.CardPosted) (bool, error)
 	BackfillStarted(ctx context.Context, src string, ev *eventsv1.SessionStarted) (bool, error)
 	ApplyFact(ctx context.Context, src string, ev proto.Message, seq uint64) (bool, error)
+	FillFromSummaries(ctx context.Context) (int, error)
 }
 
 // BackfillCounts is what a backfill read and changed.
@@ -49,6 +50,7 @@ type BackfillCounts struct {
 	Cards    int // sessions given their posted_at
 	Starts   int // sessions given their start's joined_on_lap or fuel_capacity
 	Facts    int // events applied to a session still open
+	Stored   int // sessions given schema 6's columns from their stored summary
 }
 
 // Backfill fills schema 5's columns for what logbook stored before it (the schema 5
@@ -77,6 +79,13 @@ func backfill(ctx context.Context, natsURL string, st backfillStore, logger *slo
 	var n BackfillCounts
 	ctx, cancel := context.WithTimeout(ctx, backfillTimeout)
 	defer cancel()
+	// Sessions that ended under schema 5 have their summary stored: schema 6's
+	// columns come from it, whatever EVENTS still holds.
+	stored, err := st.FillFromSummaries(ctx)
+	n.Stored = stored
+	if err != nil {
+		return n, err
+	}
 	nc, err := nats.Connect(natsURL, nats.Name("logbook backfill"))
 	if err != nil {
 		return n, fmt.Errorf("nats %s: %w", natsURL, err)
@@ -117,7 +126,7 @@ func backfill(ctx context.Context, natsURL string, st backfillStore, logger *slo
 		return n, fmt.Errorf("backfill stopped after stream sequence %d of %d: %w", read, last, err)
 	}
 	logger.InfoContext(ctx, "backfill done", "last", last, "last_read", read,
-		"read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards, "starts", n.Starts, "facts", n.Facts)
+		"read", n.Read, "sessions", n.Sessions, "laps", n.Laps, "cards", n.Cards, "starts", n.Starts, "facts", n.Facts, "stored", n.Stored)
 	return n, nil
 }
 

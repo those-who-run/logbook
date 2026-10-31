@@ -160,16 +160,17 @@ an open session's events (`session.continued`, `session.kind`,
 `session.track`, `session.paused`, `session.resumed`, `lap.best` and
 `pit.exited`), back from `EVENTS` with an ephemeral ordered consumer, from the
 stream's first message to its last when the backfill began. It sets each
-column only where it is still null, on rows the store already holds (a
-session that ended under schema 5 gets schema 6's columns from its stored
-summary's event); an open
+column only where it is still null, on rows the store already holds. An open
 session's events it applies as the subscriber does, which changes nothing on
-a session that has ended. A fetch that comes back empty ends it only once the
+a session that has ended. Before reading `EVENTS`, it fills schema 6's
+columns of a session that ended under schema 5 from its stored `summary`
+column, so that needs nothing `EVENTS` may have lost. A fetch that comes back empty ends it only once the
 server has none of them pending, and it gives up, exiting 1, after 10 min.
 It adds no session, lap or lap file and changes no other column, so it is
 safe to run again: a second run leaves the store as it was. It logs
-`backfill done` with the events read, and the sessions, laps, cards and starts
-it filled and the open-session events it applied (`facts`). `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
+`backfill done` with the events read, the sessions, laps, cards and starts it
+filled, the open-session events it applied (`facts`) and the sessions filled
+from their stored summary (`stored`). `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
 lock, so logbook must be stopped. `EVENTS` keeps 30 days, so a session whose
 events have aged out stays without them.
 

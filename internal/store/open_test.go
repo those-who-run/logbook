@@ -236,26 +236,56 @@ VALUES ('live', 's', '2026-10-31 20:00:00', 'lap_race', 3431, false, 1, 'Suzuka'
 }
 
 // A session that ended under logbook 0.1.7 has its summary but not schema 6's
-// columns: the backfill fills those from the summary, once.
-func TestTheBackfillFillsSchema6OnASessionEndedAt5(t *testing.T) {
+// columns: they are filled from its stored summary, with no event, once. A
+// session still open, or one already filled, is left alone.
+func TestSchema6IsFilledFromTheStoredSummary(t *testing.T) {
 	s := open(t, t.TempDir())
 	sess := race("live", sid)
 	sum := sess.ended.Summary
 	sum.FuelCapacity, sum.PausedMs = 90, 1500
 	sum.PitStops = []*eventsv1.PitStop{{Stop: 1, InLap: 2}}
+	sum.Kind = &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, Field: true}
+	sum.Track = &eventsv1.TrackVerdict{Name: "Fuji", Family: "Fuji", Confidence: eventsv1.TrackConfidence_TRACK_CONFIDENCE_NONE}
 	sess.write(t, s)
-	if _, err := s.index.ExecContext(t.Context(), `UPDATE sessions SET `+
-		`joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL`); err != nil {
+	if err := s.StartSession(t.Context(), race("live", sid[:25]+"Z").started); err != nil {
 		t.Fatal(err)
 	}
-	for run, want := range []bool{true, false} {
-		if did, err := s.BackfillSummary(t.Context(), "live", sess.ended); err != nil || did != want {
-			t.Errorf("run %d: %v, %v, want %v", run+1, did, err, want)
+	if _, err := s.index.ExecContext(t.Context(), `UPDATE sessions SET `+
+		`joined_on_lap = NULL, fuel_capacity = NULL, best_lap = NULL, paused_ms = NULL, gaps = NULL, pit_stops = NULL,
+    kind = NULL, track = NULL, track_label = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	for run, want := range []int{1, 0} {
+		if n, err := s.FillFromSummaries(t.Context()); err != nil || n != want {
+			t.Errorf("run %d: %d, %v, want %d", run+1, n, err, want)
 		}
 	}
-	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5Open+` FROM sessions`)
-	if want := [][]string{{"NULL", "90", "1", "1500", "NULL", `[{"inLap":2,"stop":1}]`}}; !slices.EqualFunc(got, want, slices.Equal) {
-		t.Errorf("%q, want %q", got, want)
+	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5Open+`, kind IS NOT NULL, track IS NOT NULL, track_label
+FROM sessions ORDER BY id`)
+	want := [][]string{
+		{"NULL", "90", "1", "1500", "NULL", `[{"inLap":2,"stop":1}]`, "true", "true", "Fuji"},
+		slices.Concat(slices.Repeat([]string{"NULL"}, 6), []string{"false", "false", "NULL"}),
+	}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("%q,\nwant %q", got, want)
+	}
+}
+
+// A session.started delivered again after a session.kind leaves the kind's
+// total_laps.
+func TestAStartAgainKeepsTheKindsLapTotal(t *testing.T) {
+	s := open(t, t.TempDir())
+	started := race("live", sid).started
+	if err := s.StartSession(t.Context(), started); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, s, &eventsv1.SessionKindChanged{SessionId: sid, Kind: &eventsv1.SessionKind{
+		SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE, TotalLaps: proto.Int32(10)}})
+	if err := s.StartSession(t.Context(), started); err != nil {
+		t.Fatal(err)
+	}
+	if got := rowsOf(t, t.Context(), s.index, `SELECT total_laps FROM sessions`); got[0][0] != "10" {
+		t.Errorf("total_laps %s after the start again, want the kind's 10", got[0][0])
 	}
 }
 
@@ -371,5 +401,19 @@ func TestAFactThatIsNotJSONIsRefused(t *testing.T) {
 	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5All+` FROM sessions`)
 	if want := [][]string{slices.Repeat([]string{"NULL"}, 18)}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("%q, want NULL", got)
+	}
+}
+
+// A stored summary that is not a SessionSummary stops the fill with an error.
+func TestABadStoredSummaryIsAnError(t *testing.T) {
+	s := open(t, t.TempDir())
+	if err := s.StartSession(t.Context(), race("live", sid).started); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.index.ExecContext(t.Context(), `UPDATE sessions SET summary = '{"lapsCompleted": "many"}'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FillFromSummaries(t.Context()); err == nil {
+		t.Error("no error")
 	}
 }

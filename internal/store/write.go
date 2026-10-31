@@ -17,7 +17,8 @@ import (
 )
 
 // StartSession opens ev's session in the index, under ev's source (`live` when it
-// names none). Starting the same session again changes nothing.
+// names none). Starting the same session again changes nothing; total_laps stays
+// a session.kind's once one has set it (kind_seq).
 func (s *Store) StartSession(ctx context.Context, ev *eventsv1.SessionStarted) error {
 	src := sourceOf(ev.GetSource())
 	if err := checkKey(src, ev.GetSessionId()); err != nil {
@@ -36,7 +37,7 @@ ON CONFLICT (src, id) DO UPDATE SET
     started_at = excluded.started_at,
     type = excluded.type,
     car_code = excluded.car_code,
-    total_laps = excluded.total_laps,
+    total_laps = CASE WHEN sessions.kind_seq IS NULL THEN excluded.total_laps ELSE sessions.total_laps END,
     joined_part_way = excluded.joined_part_way,
     first_seq = excluded.first_seq,
     started_fuel_at_start = excluded.started_fuel_at_start,
