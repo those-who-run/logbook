@@ -81,6 +81,7 @@ func (s *Store) MarkPosted(ctx context.Context, src string, ev *eventsv1.CardPos
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, ev.GetSessionId()); err != nil {
 		return err
 	}
@@ -109,6 +110,7 @@ func (s *Store) BackfillSummary(ctx context.Context, src string, ev *eventsv1.Se
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET summary = ?, car_name = COALESCE(?, car_name), track_id = ?, track_name = ?, track_sure = ?
 WHERE src = ? AND id = ? AND summary IS NULL`,
@@ -130,6 +132,7 @@ func (s *Store) BackfillLap(ctx context.Context, src string, lap *eventsv1.LapCo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE laps SET pit_role = ?, counts_for_best = ?
 WHERE src = ? AND session_id = ? AND lap = ? AND pit_role IS NULL`,
@@ -148,6 +151,7 @@ func (s *Store) BackfillPosted(ctx context.Context, src string, ev *eventsv1.Car
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	return changed(s.index.ExecContext(ctx, `
 UPDATE sessions SET posted_at = ? WHERE src = ? AND id = ? AND posted_at IS NULL`,
 		ev.GetPostedAt().AsTime().UTC(), src, ev.GetSessionId()))

@@ -20,6 +20,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/those-who-run/logbook/internal/serve"
 	"github.com/those-who-run/logbook/internal/service"
 	"github.com/those-who-run/logbook/internal/store"
 )
@@ -118,7 +119,8 @@ func (c Config) withDefaults() Config {
 const shutdownGrace = 3 * time.Second
 
 // Run opens the store, serves GET /healthz, connects to the server (retrying until
-// it answers) and consumes until ctx is done. Then it stops fetching, finishes the
+// it answers), answers the store's services (svc.logbook.*) and consumes until ctx
+// is done. Then it stops fetching, finishes the
 // write in progress, closes the store and returns nil. It returns an error when the
 // store cannot be opened or written, or the health address cannot be listened on.
 // A stop while it is still starting returns nil too.
@@ -191,6 +193,13 @@ func run(ctx context.Context, cfg Config, logger *slog.Logger, version string) (
 		return fmt.Errorf("jetstream: %w", err)
 	}
 	h.nc.Store(nc)
+	// The services answer from the store's reader, apart from the writes
+	// (paddock#122 and #123). They stop before the store closes.
+	svc, err := serve.Start(nc, st, version, logger)
+	if err != nil {
+		return fmt.Errorf("services: %w", err)
+	}
+	defer func() { err = errors.Join(err, svc.Stop()) }()
 
 	var api storeAPI = st
 	if cfg.wrapStore != nil {

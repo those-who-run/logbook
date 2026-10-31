@@ -271,6 +271,45 @@ DuckDB needs cgo: the image is built with `CGO_ENABLED=1` and runs from
 distroless's `cc` image, which carries glibc and libstdc++. Building or testing
 on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
 
+## The services
+
+While it runs, `logbook` answers the store's reads as NATS micro endpoints of
+the service `logbook` (paddock#122 and #123), on the subjects contracts'
+`subjects.yaml` lists, each with its request and response names in its
+endpoint metadata. Each request and reply is a `twr.store.v1` message in
+protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
+
+| Subject | Answers |
+|---|---|
+| `svc.logbook.sessions.list` | the sessions of the sources asked for, newest first, filtered by track, car, kind and days in a time zone, with each filter's values counted under the other filters, `total` and `matched` |
+| `svc.logbook.sessions.get` | one session, from the first of the sources that has it |
+| `svc.logbook.laps.list` | a session's laps by number, with the session |
+| `svc.logbook.laps.trace` | one lap's trace, v1's `lap_trace` query run as it is on the lap's file |
+| `svc.logbook.sessions.same_track` | the other sessions at the session's track, where the detector was sure of both (`track_sure`) |
+
+- **Dumb.** A session is its row: the summary its end carried, laps left out;
+  for a session still open, or ended before schema 5 and not yet backfilled,
+  only what `session.started` and its laps say (start, type, car, lap total,
+  start fuel, complete laps). A lap is its `lap.completed` with the frames
+  logbook counted and their top speed. logbook works out no flag: the reader
+  does.
+- **In the query.** The filters, counts and pages run in DuckDB, so a reply
+  holds only what was asked for. A page is 200 sessions when `limit` is 0, and
+  more than 500 is refused. A session whose track the detector was not sure of
+  has the empty track name.
+- **Never blocking.** Reads run on connections of their own, each in a
+  snapshot, so a slow read never holds up a lap being written.
+- **One data version** for the whole store: it changes with every write, and
+  on a restart. A request that carries the current one as
+  `known_data_version` is answered `unchanged`, with nothing else.
+- **Errors** are NATS micro's error headers: 400 for a bad request (no
+  sources, a page over 500, a day or time zone that cannot be read, points
+  over 10,000), 404 for a session, lap or lap file the sources do not have
+  (never an empty trace), 500 for logbook's own failure. An empty store
+  answers an empty list.
+- **Traces** equal v1 1.0.0's for the same lap file, value for value:
+  `testdata/traces/` holds v1's, made by `testdata/traces/v1_lap_trace.py`.
+
 ## Checks
 
 `make check` runs what CI runs; [`AGENTS.md`](AGENTS.md) says what that is and

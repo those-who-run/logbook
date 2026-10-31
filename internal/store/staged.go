@@ -148,6 +148,7 @@ func (s *Store) WriteStagedLap(ctx context.Context, src, run string, lap *events
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, lap.GetSessionId()); err != nil {
 		return 0, 0, err
 	}
@@ -269,6 +270,7 @@ func (s *Store) ContinueSession(ctx context.Context, src, sessionID string, c Co
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.touch()
 	if err := s.sessionExists(ctx, src, sessionID); err != nil {
 		return err
 	}
