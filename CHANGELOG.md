@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.6](https://github.com/those-who-run/logbook/compare/v0.1.5...v0.1.6) (2026-10-31)
+
+
+### Bug Fixes
+
+* **store:** contracts v0.2.7, and a ranked session's start fuel of 0 ([#28](https://github.com/those-who-run/logbook/issues/28)) ([97f8b53](https://github.com/those-who-run/logbook/commit/97f8b53256d01f953b3d8d0c65007ab4c22d383f))
+
 ## [0.1.5](https://github.com/those-who-run/logbook/compare/v0.1.4...v0.1.5) (2026-10-30)
 
 
