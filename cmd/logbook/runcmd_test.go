@@ -78,7 +78,7 @@ func TestRunStartsAndStops(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if !strings.Contains(stdout.String(), `"msg":"store open","sessions":0,"schema_version":4`) {
+	if !strings.Contains(stdout.String(), `"msg":"store open","sessions":0,"schema_version":5`) {
 		t.Errorf("no store line in %s", stdout.String())
 	}
 

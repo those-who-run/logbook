@@ -1,7 +1,8 @@
 // Command logbook is the store for Those Who Run v2. `logbook run --data DIR`
 // consumes frames and events from NATS into the store and serves GET /healthz
 // until it gets SIGINT or SIGTERM; `logbook export --data DIR --laps` prints the
-// stored laps as JSON lines; `logbook -version` prints its version. With no
+// stored laps as JSON lines; `logbook backfill --data DIR` fills the columns of
+// schema 5 from EVENTS; `logbook -version` prints its version. With no
 // command it runs the template's example service, which serves GET /healthz.
 package main
 
@@ -39,6 +40,8 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	defer stop()
 	if len(args) > 0 {
 		switch args[0] {
+		case "backfill":
+			return backfill(ctx, args[1:], getenv, stdout, stderr)
 		case "export":
 			return export(ctx, args[1:], getenv, stdout, stderr)
 		case "run":

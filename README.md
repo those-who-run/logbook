@@ -37,7 +37,9 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **A migration is one-way.** A logbook that brings the index to a new schema
   version leaves it unreadable to the release before, which refuses it as
   newer. Before deploying a release that migrates (schema version 4 came with
-  paddock#76), stop logbook and copy `index.duckdb`. Rolling back needs that
+  paddock#76, and 5 with the schema 5 issue), stop logbook and copy
+  `index.duckdb` (with `index.duckdb.wal`, if there is one) out of the data
+  directory: [Schema 5](#schema-5-and-its-backfill) has the steps. Rolling back needs that
   copy put back: the sessions and laps written since are lost from the index,
   and the lap files already written stay under `sessions/`, where a later lap
   write of the same lap replaces them.
@@ -92,6 +94,18 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
 - **`fuel_at_start`** is the first lap's starting fuel. For a session joined
   part way it can differ from v1's, which was the fuel when the session began;
   `started_fuel_at_start` is that fuel, from `session.started`.
+- **What the pit wall reads** (schema 5). `sessions.summary` is
+  `session.ended`'s `SessionSummary`, whole, as protobuf JSON (DuckDB's `JSON`
+  type), from the first end only, as the other summary columns. `car_name` is
+  `session.started`'s, then the summary's. `track_id`, `track_name` and
+  `track_sure` are the summary's track verdict, sure when its confidence is
+  probable or confirmed, as contracts' `LiveTrack.sure` and v1's
+  `sure_track_id` read it. `posted_at` is `card.posted`'s: when podium posted
+  the session's results card, the first post kept. `laps.pit_role` is the lap's
+  `PitRole` by name (`none`, `in_lap`, `out_lap`, `in_and_out`) and
+  `counts_for_best` its own flag; both are null for an event with no pit role.
+  logbook works none of them out: they are what ecu and podium publish. Each is
+  null in a row written before schema 5 until the backfill fills it.
 - **Lap files.** `seq` and v1's frame columns, holding the frames in the lap's
   `seq` range that are in race, and the finished frame that closes a race. Each
   file's key-value metadata records `frame_schema_version`.
@@ -104,6 +118,51 @@ source (`live` by default) as JSON lines, one object per lap with the `laps`
 columns, ordered by session start and lap: what the parity harness compares.
 `TWR_DATA_DIR` stands in for `--data`. It takes the lock, so it refuses while
 `logbook` runs on the same directory.
+
+## Schema 5 and its backfill
+
+`logbook backfill --data DIR [--nats URL]` fills schema 5's columns for what
+logbook stored before it. It opens the store, which migrates it, reads
+`session.ended`, `lap.completed` and `card.posted` back from `EVENTS` with an
+ephemeral ordered consumer, from the stream's first message to its last when
+the backfill began, and sets each column only where it is still null, on rows
+the store already holds. A fetch that comes back empty ends it only once the
+server has none of the three pending, and it gives up, exiting 1, after
+10 min. It adds no session, lap or lap file and changes no
+other column, so it is safe to run again: a second run changes nothing. It
+logs `backfill done` with the events read and the sessions, laps and cards it
+filled. `TWR_DATA_DIR` and `TWR_NATS_URL` stand in for the flags. It takes the
+lock, so logbook must be stopped. `EVENTS` keeps 30 days, so a session whose
+events have aged out stays without them.
+
+On a cluster, with the StatefulSet of paddock's base:
+
+1. **Back up the index.**
+   - If the stack is deployed by Argo CD with self-heal on, turn self-heal off
+     for its application first, or it scales logbook straight back up:
+     `kubectl -n argocd patch application <app> --type merge -p '{"spec":{"syncPolicy":{"automated":{"selfHeal":false}}}}'`.
+   - Stop logbook: `kubectl -n <namespace> scale statefulset/logbook --replicas=0`,
+     and wait for its pod to go
+     (`kubectl -n <namespace> wait --for=delete pod/logbook-0`).
+   - Copy `index.duckdb`, and `index.duckdb.wal` if there is one
+     (`index.duckdb*`), off the volume. The image is distroless, with no shell
+     or `tar`, and logbook is stopped, so copy from the volume itself: from
+     the storage's host directory (with a local-path provisioner, the
+     PersistentVolume's `spec.hostPath.path` or `spec.local.path`), or from a
+     pod of its own, such as busybox, that mounts the claim `data-logbook-0`
+     (`kubectl cp` from that pod).
+2. **Run the backfill** as a Job on the volume, with the release's image that
+   brings schema 5 and the StatefulSet's user and environment, and the
+   command `logbook backfill --data /data --nats nats://nats:4222`. It
+   migrates the index, then fills it. Its log ends with `backfill done`, which
+   names the stream's last sequence (`last`), the last it read (`last_read`)
+   and what it filled; a backfill that stops short exits 1 and says where.
+3. **Roll that release:** bump the image where the stack pins it (paddock's
+   base, then a hard refresh of the Argo CD application), scale logbook back
+   to 1, and turn self-heal on again. A logbook of the release before refuses
+   the migrated index, so it must not start in between.
+
+Rolling back needs the copy put back, as for any migration.
 
 ## Running
 
@@ -173,9 +232,10 @@ number of sessions in its store and its schema version.
   writes its row and leaves the summary as the end made it. The session's
   staged frames went at the end, so the lap's frames are read back from
   `TELEMETRY`; those the stream no longer holds are missing. Each event is
-  acked after its write commits. Any other type is acked and ignored. One that
-  cannot be read, or a lap or end of a session never started, is dropped with a
-  warning.
+  acked after its write commits. `card.posted` sets the session's `posted_at`
+  at once, without waiting for the session's end. Any other type is acked and
+  ignored. One that cannot be read, or a lap, end or card of a session never
+  started, is dropped with a warning.
 - **Missing frames.** A lap whose frames stop coming is written after the
   frames timeout with those there are: its row's `frames` says how many, and a
   warning, `lap written without all its frames`, names the source, session, lap

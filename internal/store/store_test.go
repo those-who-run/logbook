@@ -350,6 +350,7 @@ func TestRefusesWhatItCannotStore(t *testing.T) {
 		"a lap of a bad source":               s.WriteLap(ctx, "replay-", good.laps[0], good.frames),
 		"lap 0":                               s.WriteLap(ctx, "live", &eventsv1.LapCompleted{SessionId: sid}, good.frames),
 		"the end of a bad session id":         s.EndSession(ctx, "live", &eventsv1.SessionEnded{SessionId: "x"}, good.endedAt),
+		"an end with no summary":              s.EndSession(ctx, "live", &eventsv1.SessionEnded{SessionId: sid}, good.endedAt),
 	} {
 		if err == nil {
 			t.Errorf("%s: no error", name)
