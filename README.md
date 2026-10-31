@@ -76,10 +76,10 @@ sessions/<src>/<sid>/lap-NNN.parquet    a lap's racing frames, ZSTD
   event from contracts v0.1.3, which carries none of them: a `session.ended`
   with no `last_seq`, or a `session.started` with no start fuel. A start fuel
   of 0 is stored as 0 when the session's type is one contracts v0.1.4 added
-  (`lap_race` to `solo_timed`), and as null otherwise. So a real 0 L from a
-  v0.1.4 or later start sent as `unknown`, or with a type added after
-  `solo_timed`, is stored as null; the lasting fix is to make the field
-  `optional` in contracts.
+  or a later one (`lap_race` on, `ranked` from v0.2.7 included), and as null
+  otherwise. So a real 0 L from a v0.1.4 or later start sent as `unknown` is
+  stored as null; the lasting fix is to make the field `optional` in
+  contracts.
 - **`final_position` is not v1's.** v1's `final_position` was the position on
   the session's last frame, which is what `ended_final_position` holds, but
   for a solo session, where v1 stored GT7's 1 and ecu leaves it out.
