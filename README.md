@@ -219,10 +219,18 @@ into the store, under the source `v1-import`. Each session keeps v1's id
   session's events. v1's lap files lack a few of GT7's fields (the lap total,
   the last and best lap times, the tank's size, the field's size and the
   cars-on-track flag), so each frame takes them from v1's own summary first:
-  the session's values, and the lap times v1 stored for the laps before it.
+  the session's values, and the lap times v1 stored for the laps before it
+  ([ADR 0013](https://github.com/those-who-run/paddock/blob/main/docs/adr/0013-v1-import-fills-frames-from-v1s-summary.md)
+  in paddock, proposed). So a re-derived session's **lap times are v1's by
+  construction**: ecu gives back the times it was fed. What ecu judges from
+  the frames alone is the kind, the track, the pit stops, the positions, the
+  fuel and the finish.
 - **From v1's rows.** When ecu does not make exactly one ended session of v1's
-  (it splits it, discards it as a replay or a demo, or starts none), or the
-  lap files lack a column ecu needs, the session is taken from v1's
+  (it splits it, discards it as a replay or a demo, or starts none), the lap
+  files lack a column ecu needs, or `summary.json` lacks a value the frames
+  are made whole from (`fuel_capacity` and `total_cars`, which v1's summary
+  has only from 2026-10-16; a usable lap total; a time for each complete lap
+  of a timed session), the session is taken from v1's
   `summary.json` as v1 judged it, with v1's pit and out-lap flags, its lap
   files still the frames v1 kept. `from_v1_rows` (schema 7) is true for
   these, false for the re-derived, and null for every session v2 saw itself.
@@ -230,9 +238,12 @@ into the store, under the source `v1-import`. Each session keeps v1's id
   laps, or missing a lap file. One whose `summary.json` or lap file cannot be
   read is left out and fails the import (exit 1) once the rest are done.
 - **The summary.** A line per v1 session: re-derived or from v1's rows with
-  its complete laps against v1's, and, for a re-derived one, each difference
-  from v1's rows beyond parity's tolerances (the complete laps, each lap's
-  time exactly, its fuel used to 0.001 L); left out with the reason; or
+  its complete laps against v1's, and, for a re-derived one, what was checked
+  (`lap times are v1's; checked: complete laps, fuel, kind, track, finish`)
+  and each difference from v1's rows: the complete laps, each lap's fuel used
+  beyond 0.001 L, and the kind, the track and the finish ecu judged from the
+  frames against v1's (each lap's time is compared too, but differs only
+  through a fault in the import); left out with the reason; or
   already imported. The last line has the counts only.
 - **Safe to repeat.** A session an earlier import wrote whole is found by its
   source and id and left as it is, so a second run changes nothing.

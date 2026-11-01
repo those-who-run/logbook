@@ -19,6 +19,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,7 +105,9 @@ func (s Summary) Write(w io.Writer) error {
 	for _, x := range s.Sessions {
 		fmt.Fprintf(&b, "%s %s", x.ID, x.Outcome)
 		switch x.Outcome {
-		case Derived, FromRows:
+		case Derived:
+			fmt.Fprintf(&b, ": %d laps (v1 %d); %s", x.Laps, x.V1Laps, derivedChecks)
+		case FromRows:
 			fmt.Fprintf(&b, ": %d laps (v1 %d)", x.Laps, x.V1Laps)
 		}
 		if x.Reason != "" {
@@ -225,6 +228,9 @@ func importSession(ctx context.Context, db *sql.DB, from, id string, st Store) (
 		return out, nil
 	}
 	reason := d.oneToOne()
+	if lacks := v1.lacking(); len(lacks) > 0 {
+		reason = "summary.json lacks " + strings.Join(lacks, ", ")
+	}
 	if len(missing) > 0 {
 		reason = "its lap files lack " + strings.Join(missing, ", ")
 	}
@@ -343,11 +349,41 @@ func (d *derived) oneToOne() string {
 	return ""
 }
 
+// derivedChecks is what a re-derived session's line says of its checks. Its lap
+// times are v1's by construction: the frames' last_lap_ms is made from them
+// (frames.go), so ecu gives them back and comparing them proves nothing. The
+// rest ecu judged from the frames alone.
+const derivedChecks = "lap times are v1's; checked: complete laps, fuel, kind, track, finish"
+
 // differences are where ecu's session differs from v1's rows beyond the parity
-// tolerances: the complete laps, each lap's time, and each lap's fuel used.
+// tolerances: the complete laps, each lap's time (v1's by construction, so a
+// difference there is a fault in the import) and fuel used, and, judged by ecu
+// from the frames alone, the session's kind, its track and whether it finished.
 func differences(d *derived, v1 *v1SessionSummary) []string {
 	var out []string
-	if n := d.ended.GetSummary().GetLapsCompleted(); n != v1.LapsCompleted {
+	sum := d.ended.GetSummary()
+	if v1.Kind != nil {
+		if want, ok := v1Kinds[v1.Kind.Kind]; ok {
+			got := sum.GetKind().GetSessionType()
+			if got == eventsv1.SessionType_SESSION_TYPE_UNSPECIFIED {
+				got = sum.GetSessionType()
+			}
+			if got != want {
+				out = append(out, fmt.Sprintf("kind %s, v1 %s", kindName(got), kindName(want)))
+			}
+		}
+	}
+	if t := v1.Track; t != nil && t.ID != nil {
+		if got := sum.GetTrack(); !named(got) || got.GetTrackId() != *t.ID {
+			out = append(out, fmt.Sprintf("track %s, v1 %d", trackName(got), *t.ID))
+		}
+	} else if got := sum.GetTrack(); named(got) {
+		out = append(out, fmt.Sprintf("track %s, v1 none", trackName(got)))
+	}
+	if sum.GetFinished() != v1.Finished {
+		out = append(out, fmt.Sprintf("finished %v, v1 %v", sum.GetFinished(), v1.Finished))
+	}
+	if n := sum.GetLapsCompleted(); n != v1.LapsCompleted {
 		out = append(out, fmt.Sprintf("complete laps %d, v1 %d", n, v1.LapsCompleted))
 	}
 	ours := map[int32]*eventsv1.LapCompleted{}
@@ -411,4 +447,18 @@ func lapFrames(frames []*telemetryv1.Frame, lap *eventsv1.LapCompleted) []*telem
 		return frames
 	}
 	return frames[lo:hi]
+}
+
+func kindName(t eventsv1.SessionType) string {
+	return strings.ToLower(strings.TrimPrefix(t.String(), "SESSION_TYPE_"))
+}
+
+// named is whether a verdict names a track.
+func named(t *eventsv1.TrackVerdict) bool { return t != nil && t.TrackId != nil }
+
+func trackName(t *eventsv1.TrackVerdict) string {
+	if !named(t) {
+		return "none"
+	}
+	return strconv.Itoa(int(t.GetTrackId()))
 }

@@ -116,6 +116,19 @@ func TestImportGivesOneSessionEqualToV1sRows(t *testing.T) {
 		t.Errorf("summary track %q and %d pit stops, want Suzuka East and 1",
 			row.GetSummary().GetTrack().GetName(), len(row.GetSummary().GetPitStops()))
 	}
+	// Judged by ecu from the frames alone, whatever v1's lap times: a lap race
+	// with a field (GT7's count of 2 cars and v1's lap total of 6 are the only
+	// inputs from v1's rows), its rolling start, P1 at the flag.
+	k := row.GetSummary().GetKind()
+	if k.GetSessionType() != eventsv1.SessionType_SESSION_TYPE_LAP_RACE || !k.GetField() ||
+		k.GetStart() != eventsv1.StartType_START_TYPE_ROLLING || !row.GetSummary().GetFinished() ||
+		row.GetSummary().GetFinalPosition() != 1 {
+		t.Errorf("kind %v, finished %v, P%d: want a lap race with a field, rolling, finished P1",
+			k, row.GetSummary().GetFinished(), row.GetSummary().GetFinalPosition())
+	}
+	if stop := row.GetSummary().GetPitStops()[0]; stop.GetInLap() != 3 || stop.GetOutLap() != 4 || stop.GetFuelAdded() < 70 {
+		t.Errorf("pit stop %v: want in on lap 3, out on 4, about 77 L added", stop)
+	}
 	v1 := summaryOf(t, from, fixtureID)
 	laps := lapsOf(t, st, fixtureID)
 	if len(laps) != len(v1.Laps) {
@@ -124,6 +137,8 @@ func TestImportGivesOneSessionEqualToV1sRows(t *testing.T) {
 	roles := map[string]eventsv1.PitRole{"in": eventsv1.PitRole_PIT_ROLE_IN_LAP, "out": eventsv1.PitRole_PIT_ROLE_OUT_LAP}
 	for i, want := range v1.Laps {
 		lap := laps[i].GetLap()
+		// Circular, kept as a guard on the import itself: the frames' last_lap_ms
+		// is made from v1's lap times (frames.go), so ecu can only give them back.
 		if lap.GetLap() != want.Lap || lap.GetLapTimeMs() != *want.LapTimeMs || lap.GetComplete() != want.Complete {
 			t.Errorf("lap %d: %d ms complete %v, v1 lap %d %d ms complete %v", lap.GetLap(), lap.GetLapTimeMs(),
 				lap.GetComplete(), want.Lap, *want.LapTimeMs, want.Complete)
@@ -338,6 +353,79 @@ func TestASessionWhoseFramesLackFieldsComesFromV1sRows(t *testing.T) {
 		if l.GetLap().GetPitRole() != want[i] || l.GetFrames() == 0 {
 			t.Errorf("lap %d: pit role %v, %d frames; want %v and its frames", i+1, l.GetLap().GetPitRole(), l.GetFrames(), want[i])
 		}
+	}
+}
+
+// stripKeys rewrites the fixture's summary.json without keys.
+func stripKeys(t *testing.T, from string, keys ...string) {
+	t.Helper()
+	path := filepath.Join(from, v1Sessions, fixtureID, v1Summary)
+	data, err := os.ReadFile(path) //nolint:gosec // the test's own copy
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		delete(m, k)
+	}
+	if data, err = json.Marshal(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil { //nolint:gosec // the test's own copy
+		t.Fatal(err)
+	}
+}
+
+// A summary from before v1 kept a value the frames are made whole from
+// (fuel_capacity and total_cars came with v1#80, 2026-10-16) would have ecu judge
+// the session on a made-up value: a 6-lap race with a field read as solo timed.
+// It is taken from v1's rows instead, saying what summary.json lacks (ADR 0009,
+// point 5).
+func TestASummaryLackingAFillSourceComesFromV1sRows(t *testing.T) {
+	for _, c := range []struct {
+		keys []string
+		want string
+	}{
+		{[]string{"fuel_capacity", "total_cars"}, "summary.json lacks fuel_capacity, total_cars"},
+		{[]string{"total_cars"}, "summary.json lacks total_cars"},
+		{[]string{"total_laps"}, "summary.json lacks a usable lap total"},
+	} {
+		from, data := v1Dir(t), t.TempDir()
+		stripKeys(t, from, c.keys...)
+		st := openStore(t, data)
+		sum, err := Run(t.Context(), from, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := sum.Sessions[0]; got.Outcome != FromRows || got.Reason != c.want || len(got.Differences) > 0 {
+			t.Errorf("without %v: %+v, want from v1's rows: %s", c.keys, got, c.want)
+		}
+		row := sessionOf(t, st, fixtureID)
+		if !row.GetFromV1Rows() || row.GetSummary().GetSessionType() != eventsv1.SessionType_SESSION_TYPE_LAP_RACE {
+			t.Errorf("without %v: %v, want v1's lap race, from_v1_rows", c.keys, row)
+		}
+	}
+}
+
+// A timed session needs every complete lap's time, or the frames carry no
+// last_lap_ms to judge it by; a lap total v1's kind disagrees with is no use.
+func TestLacking(t *testing.T) {
+	keys := map[string]bool{"fuel_capacity": true, "total_cars": true, "total_laps": true}
+	timed := &v1SessionSummary{keys: keys, FuelCapacity: ptr(100.0), Kind: &v1Kind{Kind: "solo_timed"},
+		Laps: []v1Lap{{Lap: 1, Complete: true, LapTimeMs: ptr(int32(60000))}, {Lap: 2, Complete: true}, {Lap: 3}}}
+	if got := strings.Join(timed.lacking(), ", "); got != "a time for each complete lap" {
+		t.Errorf("timed: %q", got)
+	}
+	race := &v1SessionSummary{keys: keys, FuelCapacity: ptr(100.0), TotalLaps: 5, Kind: &v1Kind{Kind: "lap_race", TotalLaps: ptr(int32(6))}}
+	if got := strings.Join(race.lacking(), ", "); got != "a usable lap total" {
+		t.Errorf("a lap total the kind disagrees with: %q", got)
+	}
+	race.Kind.TotalLaps = ptr(int32(5))
+	if got := race.lacking(); len(got) != 0 {
+		t.Errorf("a whole summary lacks %v", got)
 	}
 }
 

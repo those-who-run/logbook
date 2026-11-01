@@ -68,6 +68,9 @@ type v1SessionSummary struct {
 	PitStops      []v1PitStop `json:"pit_stops"`
 	Shutdown      bool        `json:"engineer_shutdown"`
 	Laps          []v1Lap     `json:"laps"`
+	// keys are the keys summary.json has: a summary from before a field was
+	// added lacks its key.
+	keys map[string]bool
 }
 
 type v1Track struct {
@@ -177,7 +180,51 @@ func readSummary(dir, id string) (*v1SessionSummary, error) {
 	if sum.SessionID != id {
 		return nil, fmt.Errorf("%s names session %q, not %q", v1Summary, sum.SessionID, id)
 	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil, fmt.Errorf("%s: %w", v1Summary, err)
+	}
+	sum.keys = make(map[string]bool, len(keys))
+	for k := range keys {
+		sum.keys[k] = true
+	}
 	return &sum, nil
+}
+
+// timedKinds are v1's kinds with no lap total, where the session ends on the
+// clock and each lap's time is all there is to judge it by.
+var timedKinds = map[string]bool{"timed_field": true, "solo_timed": true}
+
+// lacking is what summary.json lacks of the values the frames are made whole
+// from (frames.go): with any one missing, ecu would judge the session on a made-up
+// value, so it is taken from v1's rows instead (ADR 0009, point 5). fuel_capacity
+// and total_cars came into v1's summary on 2026-10-16 (v1#80); a null
+// total_cars is GT7's "no field", and stands.
+func (s *v1SessionSummary) lacking() []string {
+	var out []string
+	if !s.keys["fuel_capacity"] || s.FuelCapacity == nil {
+		out = append(out, "fuel_capacity")
+	}
+	if !s.keys["total_cars"] {
+		out = append(out, "total_cars")
+	}
+	if !s.keys["total_laps"] || s.TotalLaps < 0 ||
+		(s.Kind != nil && s.Kind.TotalLaps != nil && *s.Kind.TotalLaps != s.TotalLaps) {
+		out = append(out, "a usable lap total")
+	}
+	timed := s.TotalLaps == 0
+	if s.Kind != nil {
+		timed = timedKinds[s.Kind.Kind]
+	}
+	if timed {
+		for _, l := range s.Laps {
+			if l.Complete && (l.LapTimeMs == nil || *l.LapTimeMs <= 0) {
+				out = append(out, "a time for each complete lap")
+				break
+			}
+		}
+	}
+	return out
 }
 
 // v1FrameColumns are the lap files' columns at v1.0.0 (store.py's

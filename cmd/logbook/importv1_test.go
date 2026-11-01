@@ -45,7 +45,7 @@ func TestImportV1PrintsItsSummary(t *testing.T) {
 		if code := run(t.Context(), args, env(nil), &stdout, &stderr); code != 0 {
 			t.Fatalf("%q: exit %d, stderr %q", args, code, stderr.String())
 		}
-		if !strings.HasPrefix(stdout.String(), "20261015-180014 re-derived: 6 laps (v1 6)\n") {
+		if !strings.HasPrefix(stdout.String(), "20261015-180014 re-derived: 6 laps (v1 6); lap times are v1's; checked: complete laps, fuel, kind, track, finish\n") {
 			t.Errorf("%q: stdout %q", args, stdout.String())
 		}
 	}

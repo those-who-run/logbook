@@ -59,8 +59,8 @@ github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
 github.com/those-who-run/contracts v0.2.8 h1:kULoQFxJ6IQxNUWvARVCwwbHNzgJw+inOfjjghGXWPY=
 github.com/those-who-run/contracts v0.2.8/go.mod h1:eDzdWY7vvyi1RHjmqx3x6WqvlpVA+CMtZIwAZMvNtBw=
-github.com/those-who-run/ecu v0.1.16-0.20261031232236-f8b753686bfb h1:7gcoW99QugGnmTwwEnhP2xzYEbXCnDERPU/ctK2441I=
-github.com/those-who-run/ecu v0.1.16-0.20261031232236-f8b753686bfb/go.mod h1:uGf/I/zjFfP7ngPefNyvTNJMrHZgmQx71zmQyipWbmw=
+github.com/those-who-run/ecu v0.1.16-0.20261101000707-85c3cc54ba0b h1:6CbNBlXujeQEAQCkSJHNNwBgy18otWJENjgSbL/XbSk=
+github.com/those-who-run/ecu v0.1.16-0.20261101000707-85c3cc54ba0b/go.mod h1:uGf/I/zjFfP7ngPefNyvTNJMrHZgmQx71zmQyipWbmw=
 github.com/those-who-run/salsa v0.1.2 h1:WCrIt2PbpimMUx7NiZi65og9BFc/6EwhCqGgAuj2aE0=
 github.com/those-who-run/salsa v0.1.2/go.mod h1:BZYvNQ7Eo9UOvwST4hgCKyhkh2cOZvAIJm6B2T+q1pg=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=

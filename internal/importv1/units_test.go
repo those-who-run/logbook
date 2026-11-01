@@ -59,6 +59,28 @@ func TestDifferences(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
+// The checks ecu makes from the frames alone, independent of v1's lap times:
+// the kind, the track and the finish. A 6-lap race with a field that comes out
+// solo timed, at another track or none, unfinished, says so.
+func TestDifferencesInWhatEcuJudgedAlone(t *testing.T) {
+	d := &derived{ended: &eventsv1.SessionEnded{Summary: &eventsv1.SessionSummary{
+		SessionType: eventsv1.SessionType_SESSION_TYPE_SOLO_TIMED, Track: &eventsv1.TrackVerdict{TrackId: proto.Int32(7)},
+	}}}
+	v1 := &v1SessionSummary{Kind: &v1Kind{Kind: "lap_race"}, Track: &v1Track{ID: proto.Int32(442)}, Finished: true}
+	want := "kind solo_timed, v1 lap_race; track 7, v1 442; finished false, v1 true"
+	if got := strings.Join(differences(d, v1), "; "); got != want {
+		t.Errorf("%s\nwant %s", got, want)
+	}
+	d.ended.Summary = &eventsv1.SessionSummary{Kind: &eventsv1.SessionKind{SessionType: eventsv1.SessionType_SESSION_TYPE_LAP_RACE}}
+	if got := strings.Join(differences(d, v1), "; "); got != "track none, v1 442; finished false, v1 true" {
+		t.Errorf("no track: %s", got)
+	}
+	d.ended.Summary.Track = &eventsv1.TrackVerdict{TrackId: proto.Int32(7)}
+	if got := strings.Join(differences(d, &v1SessionSummary{}), "; "); got != "track 7, v1 none" {
+		t.Errorf("v1 named none: %s", got)
+	}
+}
+
 func TestNum(t *testing.T) {
 	for _, c := range []struct {
 		v    any
@@ -187,7 +209,7 @@ func TestAnUnreadableLapFileFailsTheSession(t *testing.T) {
 	}}).Write(&out); err != nil {
 		t.Fatal(err)
 	}
-	want := "a re-derived: 2 laps (v1 3)\n  differs: complete laps 2, v1 3\n" +
+	want := "a re-derived: 2 laps (v1 3); " + derivedChecks + "\n  differs: complete laps 2, v1 3\n" +
 		"b from v1's rows: 1 laps (v1 1): ecu split it into 2 sessions\n" +
 		"v1 sessions: 2; re-derived: 1 (differing from v1: 1); from v1's rows: 1; left out: 0; already imported: 0; failed to read: 0\n"
 	if out.String() != want {
