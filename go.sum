@@ -57,8 +57,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/those-who-run/contracts v0.2.8 h1:kULoQFxJ6IQxNUWvARVCwwbHNzgJw+inOfjjghGXWPY=
-github.com/those-who-run/contracts v0.2.8/go.mod h1:eDzdWY7vvyi1RHjmqx3x6WqvlpVA+CMtZIwAZMvNtBw=
+github.com/those-who-run/contracts v0.2.10-0.20261101150439-d3e95bb9ea34 h1:Ik12oJqFyM+qgU4BjoGjJtFDUl0oNqpGljhzhDRDaa0=
+github.com/those-who-run/contracts v0.2.10-0.20261101150439-d3e95bb9ea34/go.mod h1:eDzdWY7vvyi1RHjmqx3x6WqvlpVA+CMtZIwAZMvNtBw=
 github.com/those-who-run/ecu v0.1.16 h1:Lmdml6I8O5k2vuCdFjcNvlcEz2vp4yV/YQ2Ab4sqQXw=
 github.com/those-who-run/ecu v0.1.16/go.mod h1:uGf/I/zjFfP7ngPefNyvTNJMrHZgmQx71zmQyipWbmw=
 github.com/those-who-run/salsa v0.1.2 h1:WCrIt2PbpimMUx7NiZi65og9BFc/6EwhCqGgAuj2aE0=
