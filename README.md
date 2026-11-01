@@ -370,10 +370,10 @@ on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
 ## The services
 
 While it runs, `logbook` answers the store's reads, and the pit wall's two
-writes, deleting a session and restoring it (paddock ADR 0014), as NATS micro endpoints of
-the service `logbook` (paddock#122 and #123), on the subjects contracts'
-`subjects.yaml` lists, each with its request and response names in its
-endpoint metadata. Each request and reply is a `twr.store.v1` message in
+writes, deleting a session and restoring it (paddock ADR 0014), as NATS
+micro endpoints of the service `logbook` (paddock#122 and #123), on the
+subjects contracts' `subjects.yaml` lists, each with its request and
+response names in its endpoint metadata. Each request and reply is a `twr.store.v1` message in
 protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
 
 | Subject | Answers |

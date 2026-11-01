@@ -91,7 +91,7 @@ func (s *Store) ListSessions(ctx context.Context, req *storev1.ListSessionsReque
 	}
 	out := &storev1.ListSessionsResponse{DataVersion: version, Options: &storev1.FilterCounts{}}
 	err = s.read(ctx, func(tx *sql.Tx) error {
-		with, args := listedOf(req.GetSources())
+		with, args := sessionsOf(req.GetSources(), listed)
 		all, allArgs := f.where("")
 		q := with + `SELECT count(*), count(*) FILTER (WHERE ` + all + `) FROM s`
 		if err := tx.QueryRowContext(ctx, q, append(slices.Clone(args), allArgs...)...).Scan(&out.Total, &out.Matched); err != nil {
@@ -186,7 +186,7 @@ func (s *Store) ListSameTrack(ctx context.Context, req *storev1.ListSameTrackReq
 		if err != nil {
 			return err
 		}
-		with, args := sessionsOf(req.GetSources())
+		with, args := sessionsOf(req.GetSources(), everySession)
 		var track sql.NullInt32
 		err = tx.QueryRowContext(ctx, with+`SELECT track_id FROM s WHERE src = ? AND id = ? AND track_sure`,
 			append(slices.Clone(args), row.GetSource(), row.GetSessionId())...).Scan(&track)
@@ -354,7 +354,9 @@ func pageLimit(offset, limit int32) (int32, error) {
 // (track_label, contracts' format.TrackLabel: the layout's name when sure, else
 // the circuit's) and the empty name for a track it cannot name, kind_key the type as stored (ecu's final verdict once the
 // session ends, its first one before), and last_lap the highest lap stored.
-func sessionsOf(sources []string) (string, []any) {
+// which says whether the deleted sessions (schema 8) are among them: listed
+// leaves them out, as sessions.list does, everySession keeps them.
+func sessionsOf(sources []string, which sessionSet) (string, []any) {
 	// The label of no track, format.TrackLabel's, is the empty name.
 	args := []any{format.TrackLabel(nil)}
 	for _, src := range sources {
@@ -365,17 +367,20 @@ func sessionsOf(sources []string) (string, []any) {
         CASE WHEN s.track_label IS NULL OR s.track_label = ? THEN '' ELSE s.track_label END AS track_key,
         coalesce(s.session_kind, s.type) AS kind_key,
         (SELECT max(l.lap) FROM laps l WHERE l.src = s.src AND l.session_id = s.id) AS last_lap
-    FROM sessions s WHERE s.src IN (` + placeholders(len(sources)) + `)
+    FROM sessions s WHERE s.src IN (` + placeholders(len(sources)) + `)` + string(which) + `
 )
 `, args
 }
 
-// listedOf is sessionsOf without the deleted sessions (schema 8): those
-// sessions.list lists and counts.
-func listedOf(sources []string) (string, []any) {
-	with, args := sessionsOf(sources)
-	return strings.Replace(with, "WHERE s.src IN", "WHERE s.deleted_at IS NULL AND s.src IN", 1), args
-}
+// A sessionSet is the condition sessionsOf adds to its sessions.
+type sessionSet string
+
+// The sets sessionsOf takes: every session of the sources, or those
+// sessions.list lists, the deleted left out.
+const (
+	everySession sessionSet = ""
+	listed       sessionSet = " AND s.deleted_at IS NULL"
+)
 
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
@@ -390,7 +395,7 @@ const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR,
 // findSession is the session id from the first of sources, in their order, that
 // has it.
 func findSession(ctx context.Context, tx *sql.Tx, sources []string, id string) (*storev1.SessionRow, error) {
-	with, args := sessionsOf(sources)
+	with, args := sessionsOf(sources, everySession)
 	args = append(args, id)
 	order := make([]string, len(sources))
 	for i, src := range sources {
