@@ -7,7 +7,7 @@ toolchain go1.27.3
 require (
 	github.com/duckdb/duckdb-go/v2 v2.10506.0
 	github.com/nats-io/nats.go v1.54.0
-	github.com/those-who-run/contracts v0.2.8
+	github.com/those-who-run/contracts v0.2.10
 	github.com/those-who-run/ecu v0.1.16
 	github.com/those-who-run/salsa v0.1.2
 	google.golang.org/protobuf v1.36.12

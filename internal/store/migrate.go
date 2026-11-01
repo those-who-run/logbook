@@ -172,6 +172,14 @@ ALTER TABLE sessions ADD COLUMN best_seq BIGINT;
 	`
 ALTER TABLE sessions ADD COLUMN from_v1_rows BOOLEAN;
 `,
+	// 8: deleting a session from the pit wall (paddock ADR 0014). deleted_at is
+	// when svc.logbook.sessions.delete deleted it, softly: its rows and lap
+	// files stay, and svc.logbook.sessions.restore sets it back to NULL. No
+	// other write touches it, so a session started, ended or imported again
+	// stays deleted. NULL for every session not deleted.
+	`
+ALTER TABLE sessions ADD COLUMN deleted_at TIMESTAMP;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

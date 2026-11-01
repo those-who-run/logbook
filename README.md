@@ -369,10 +369,11 @@ on a laptop needs a C and C++ toolchain (`gcc`, `g++`).
 
 ## The services
 
-While it runs, `logbook` answers the store's reads as NATS micro endpoints of
-the service `logbook` (paddock#122 and #123), on the subjects contracts'
-`subjects.yaml` lists, each with its request and response names in its
-endpoint metadata. Each request and reply is a `twr.store.v1` message in
+While it runs, `logbook` answers the store's reads, and the pit wall's two
+writes, deleting a session and restoring it (paddock ADR 0014), as NATS
+micro endpoints of the service `logbook` (paddock#122 and #123), on the
+subjects contracts' `subjects.yaml` lists, each with its request and
+response names in its endpoint metadata. Each request and reply is a `twr.store.v1` message in
 protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
 
 | Subject | Answers |
@@ -382,6 +383,8 @@ protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
 | `svc.logbook.laps.list` | a session's laps by number, with the session |
 | `svc.logbook.laps.trace` | one lap's trace, v1's `lap_trace` query run as it is on the lap's file |
 | `svc.logbook.sessions.same_track` | the other sessions at the session's track, where the detector was sure of both (`track_sure`) |
+| `svc.logbook.sessions.delete` | deletes a closed session, softly, and answers it with `deleted_at` set |
+| `svc.logbook.sessions.restore` | restores a deleted session, and answers it with `deleted_at` cleared |
 
 - **Dumb.** A session is its row: the summary its end carried, laps left out;
   for a session still open, or ended before schema 5 and not yet backfilled,
@@ -398,6 +401,15 @@ protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
   the layout's name when the detector was sure of it, else the circuit's; a
   track it cannot name at all has the empty name. Same-track matches sure
   tracks only.
+- **Soft delete.** A delete sets the session's `deleted_at` (schema 8) and
+  keeps its rows and lap files; a restore clears it. A deleted session is left
+  out of `sessions.list`, its total and its filter counts, and out of the
+  others `sessions.same_track` answers; `sessions.get`, `laps.list` and
+  `laps.trace` still answer for it, with `deleted_at` set. No other write
+  touches `deleted_at`, so a session's events delivered again, or
+  `logbook import-v1` run again, leave it deleted. Deleting a deleted session,
+  or restoring one that is not, changes nothing and answers the same data
+  version; a delete or restore that changes the session changes it.
 - **Never blocking.** Reads run on connections of their own, each in a
   snapshot, so a slow read never holds up a lap being written.
 - **Data versions.** The sessions and laps answers carry one for the whole
@@ -413,7 +425,8 @@ protobuf's JSON form; the pit wall maps them to its own (`twr.pitwall.v1`).
 - **Errors** are NATS micro's error headers: 400 for a bad request (no
   sources, a page over 500, a day or time zone that cannot be read, points
   over 10,000), 404 for a session, lap or lap file the sources do not have
-  (never an empty trace), 500 for logbook's own failure. An empty store
+  (never an empty trace), 409 for deleting an open session, 500 for
+  logbook's own failure. An empty store
   answers an empty list.
 - **Traces** equal v1 1.0.0's for the same lap file, value for value:
   `testdata/traces/` holds v1's, made by `testdata/traces/v1_lap_trace.py`.
