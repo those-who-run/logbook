@@ -352,13 +352,16 @@ func (d *derived) oneToOne() string {
 // derivedChecks is what a re-derived session's line says of its checks. Its lap
 // times are v1's by construction: the frames' last_lap_ms is made from them
 // (frames.go), so ecu gives them back and comparing them proves nothing. The
-// rest ecu judged from the frames alone.
-const derivedChecks = "lap times are v1's; checked: complete laps, fuel, kind, track, finish"
+// track and the finish ecu judged from the frames alone; the kind from the
+// frames and three filled values, v1's lap total, field size and cars-on-track
+// flag, so comparing it checks ecu's reading of those, not the values.
+const derivedChecks = "lap times are v1's; checked: complete laps, fuel, track, finish, kind (from v1's lap total, field size and cars-on-track)"
 
 // differences are where ecu's session differs from v1's rows beyond the parity
 // tolerances: the complete laps, each lap's time (v1's by construction, so a
-// difference there is a fault in the import) and fuel used, and, judged by ecu
-// from the frames alone, the session's kind, its track and whether it finished.
+// difference there is a fault in the import) and fuel used, the session's track
+// and whether it finished, judged by ecu from the frames alone, and its kind,
+// judged from the frames and v1's lap total, field size and cars-on-track flag.
 func differences(d *derived, v1 *v1SessionSummary) []string {
 	var out []string
 	sum := d.ended.GetSummary()

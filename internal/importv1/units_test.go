@@ -59,8 +59,8 @@ func TestDifferences(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-// The checks ecu makes from the frames alone, independent of v1's lap times:
-// the kind, the track and the finish. A 6-lap race with a field that comes out
+// The checks independent of v1's lap times: the track and the finish, from the
+// frames alone, and the kind, from the frames and v1's filled inputs. A 6-lap race with a field that comes out
 // solo timed, at another track or none, unfinished, says so.
 func TestDifferencesInWhatEcuJudgedAlone(t *testing.T) {
 	d := &derived{ended: &eventsv1.SessionEnded{Summary: &eventsv1.SessionSummary{

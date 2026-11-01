@@ -223,8 +223,10 @@ into the store, under the source `v1-import`. Each session keeps v1's id
   ([ADR 0013](https://github.com/those-who-run/paddock/blob/main/docs/adr/0013-v1-import-fills-frames-from-v1s-summary.md)
   in paddock, proposed). So a re-derived session's **lap times are v1's by
   construction**: ecu gives back the times it was fed. What ecu judges from
-  the frames alone is the kind, the track, the pit stops, the positions, the
-  fuel and the finish.
+  the frames alone is the track, the pit stops, the positions, the fuel and
+  the finish. It judges the kind and the start from the frames plus three of
+  the filled values (v1's lap total, field size and cars-on-track flag), so
+  those are partly v1's.
 - **From v1's rows.** When ecu does not make exactly one ended session of v1's
   (it splits it, discards it as a replay or a demo, or starts none), the lap
   files lack a column ecu needs, or `summary.json` lacks a value the frames
@@ -239,10 +241,11 @@ into the store, under the source `v1-import`. Each session keeps v1's id
   read is left out and fails the import (exit 1) once the rest are done.
 - **The summary.** A line per v1 session: re-derived or from v1's rows with
   its complete laps against v1's, and, for a re-derived one, what was checked
-  (`lap times are v1's; checked: complete laps, fuel, kind, track, finish`)
+  (`lap times are v1's; checked: complete laps, fuel, track, finish, kind (from v1's lap total, field size and cars-on-track)`)
   and each difference from v1's rows: the complete laps, each lap's fuel used
-  beyond 0.001 L, and the kind, the track and the finish ecu judged from the
-  frames against v1's (each lap's time is compared too, but differs only
+  beyond 0.001 L, the track and the finish ecu judged from the frames, and
+  the kind ecu judged from the frames and v1's filled inputs, against v1's
+  (each lap's time is compared too, but differs only
   through a fault in the import); left out with the reason; or
   already imported. The last line has the counts only.
 - **Safe to repeat.** A session an earlier import wrote whole is found by its

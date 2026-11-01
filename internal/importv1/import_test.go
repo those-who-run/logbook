@@ -116,9 +116,9 @@ func TestImportGivesOneSessionEqualToV1sRows(t *testing.T) {
 		t.Errorf("summary track %q and %d pit stops, want Suzuka East and 1",
 			row.GetSummary().GetTrack().GetName(), len(row.GetSummary().GetPitStops()))
 	}
-	// Judged by ecu from the frames alone, whatever v1's lap times: a lap race
-	// with a field (GT7's count of 2 cars and v1's lap total of 6 are the only
-	// inputs from v1's rows), its rolling start, P1 at the flag.
+	// Judged by ecu whatever v1's lap times: a lap race with a field and its
+	// rolling start, from the frames and three filled values (v1's 2 cars, lap
+	// total of 6 and cars-on-track flag), and P1 at the flag from the frames.
 	k := row.GetSummary().GetKind()
 	if k.GetSessionType() != eventsv1.SessionType_SESSION_TYPE_LAP_RACE || !k.GetField() ||
 		k.GetStart() != eventsv1.StartType_START_TYPE_ROLLING || !row.GetSummary().GetFinished() ||
