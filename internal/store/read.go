@@ -374,7 +374,7 @@ func placeholders(n int) string {
 const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR, posted_at, last_lap,
     started_at, ended_at, kind_key, car_code, car_name, total_laps, laps_completed, started_fuel_at_start,
     joined_on_lap, fuel_capacity, best_lap, best_lap_ms, paused_ms, gaps::VARCHAR, pit_stops::VARCHAR,
-    kind::VARCHAR, track::VARCHAR`
+    kind::VARCHAR, track::VARCHAR, from_v1_rows`
 
 // findSession is the session id from the first of sources, in their order, that
 // has it.
@@ -410,12 +410,13 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 			endReason, summary sql.NullString
 			postedAt           sql.NullTime
 			lastLap            sql.NullInt32
+			fromV1Rows         sql.NullBool
 			o                  openRow
 		)
 		if err := rows.Scan(&r.SessionId, &r.Source, &r.Closed, &endReason, &summary, &postedAt, &lastLap,
 			&o.startedAt, &o.endedAt, &o.kind, &o.carCode, &o.carName, &o.totalLaps, &o.lapsDone, &o.fuelAtStart,
 			&o.joinedOnLap, &o.fuelCapacity, &o.bestLap, &o.bestLapMs, &o.pausedMs, &o.gaps, &o.pitStops,
-			&o.kindJSON, &o.track); err != nil {
+			&o.kindJSON, &o.track, &fromV1Rows); err != nil {
 			return nil, err
 		}
 		if endReason.Valid {
@@ -436,6 +437,9 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 		}
 		if lastLap.Valid {
 			r.LastLap = proto.Int32(lastLap.Int32)
+		}
+		if fromV1Rows.Valid {
+			r.FromV1Rows = proto.Bool(fromV1Rows.Bool)
 		}
 		out = append(out, &r)
 	}

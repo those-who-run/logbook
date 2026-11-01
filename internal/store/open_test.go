@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -229,7 +230,8 @@ VALUES ('live', 's', '2026-10-31 20:00:00', 'lap_race', 3431, false, 1, 'Suzuka'
 	}
 	withIndex(t, dir, func(db *sql.DB) {
 		got := rowsOf(t, t.Context(), db, `SELECT (SELECT version FROM schema_version), track_name, `+schema5Open+` FROM sessions`)
-		if want := [][]string{{"6", "Suzuka", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		// At the code's version: 7 (paddock#264) leaves 6's columns as they were.
+		if want := [][]string{{fmt.Sprint(SchemaVersion), "Suzuka", "NULL", "NULL", "NULL", "NULL", "NULL", "NULL"}}; !slices.EqualFunc(got, want, slices.Equal) {
 			t.Errorf("%q, want %q", got, want)
 		}
 	})
@@ -399,7 +401,7 @@ func TestAFactThatIsNotJSONIsRefused(t *testing.T) {
 		}
 	}
 	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5All+` FROM sessions`)
-	if want := [][]string{slices.Repeat([]string{"NULL"}, 18)}; !slices.EqualFunc(got, want, slices.Equal) {
+	if want := [][]string{slices.Repeat([]string{"NULL"}, 19)}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("%q, want NULL", got)
 	}
 }

@@ -165,6 +165,13 @@ ALTER TABLE sessions ADD COLUMN kind_seq BIGINT;
 ALTER TABLE sessions ADD COLUMN track_seq BIGINT;
 ALTER TABLE sessions ADD COLUMN best_seq BIGINT;
 `,
+	// 7: v1's history (paddock#264, ADR 0009). from_v1_rows says how a session
+	// `logbook import-v1` wrote under the source v1-import was made: true taken
+	// from v1's own rows, false re-derived from its frames through ecu's race
+	// state. NULL for every session v2 saw itself.
+	`
+ALTER TABLE sessions ADD COLUMN from_v1_rows BOOLEAN;
+`,
 }
 
 // SchemaVersion is the index's schema version this code writes.

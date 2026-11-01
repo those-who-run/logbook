@@ -8,6 +8,8 @@ require (
 	github.com/duckdb/duckdb-go/v2 v2.10506.0
 	github.com/nats-io/nats.go v1.54.0
 	github.com/those-who-run/contracts v0.2.8
+	github.com/those-who-run/ecu v0.1.16
+	github.com/those-who-run/salsa v0.1.2
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -27,13 +29,14 @@ require (
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/oklog/ulid/v2 v2.1.2 // indirect
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	golang.org/x/mod v0.33.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260209163413-e7419c687ee4 // indirect
 	golang.org/x/tools v0.42.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
