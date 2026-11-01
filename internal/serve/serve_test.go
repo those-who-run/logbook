@@ -15,8 +15,10 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
+	eventsv1 "github.com/those-who-run/contracts/gen/go/twr/events/v1"
 	storev1 "github.com/those-who-run/contracts/gen/go/twr/store/v1"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/those-who-run/logbook/internal/store"
 )
@@ -136,6 +138,10 @@ func TestTheHandlersAnswerAndRefuse(t *testing.T) {
 		{"svc.logbook.laps.list", `{"sources":["live"],"sessionId":"x"}`, "404"},
 		{"svc.logbook.laps.trace", `{"sources":["live"],"sessionId":"x","lap":1}`, "404"},
 		{"svc.logbook.sessions.same_track", `{"sources":["live"],"sessionId":"x"}`, "404"},
+		{"svc.logbook.sessions.delete", `{"sources":["live"],"sessionId":"x"}`, "404"},
+		{"svc.logbook.sessions.restore", `{"sources":["live"],"sessionId":"x"}`, "404"},
+		{"svc.logbook.sessions.delete", `{"sessionId":"x"}`, "400"},
+		{"svc.logbook.sessions.restore", `not json`, "400"},
 	} {
 		r := call(t, st, c.subject, c.body)
 		if r.code != c.code || r.answer != nil || r.desc == "" {
@@ -145,6 +151,41 @@ func TestTheHandlersAnswerAndRefuse(t *testing.T) {
 	// A field from a newer contract is ignored, not refused.
 	if r := call(t, st, "svc.logbook.sessions.list", `{"sources":["live"],"later":1}`); r.code != "" {
 		t.Errorf("an unknown field: %s %s", r.code, r.desc)
+	}
+}
+
+// ADR 0014: a delete answers the session with deleted_at set, a restore with
+// it cleared, and deleting an open session is 409.
+func TestDeleteAndRestoreAnswer(t *testing.T) {
+	st, err := store.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	const id = "01JB8Z3K5Q9T2M7XW4R6N1PDHE"
+	started := &eventsv1.SessionStarted{SessionId: id, Source: store.SourceLive, StartedAt: timestamppb.Now()}
+	if err := st.StartSession(t.Context(), started); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"sources":["live"],"sessionId":"` + id + `"}`
+	if r := call(t, st, "svc.logbook.sessions.delete", body); r.code != "409" || r.answer != nil {
+		t.Errorf("deleting an open session: %q %q, answer %s; want 409", r.code, r.desc, r.answer)
+	}
+	ended := &eventsv1.SessionEnded{SessionId: id, Summary: &eventsv1.SessionSummary{}}
+	if err := st.EndSession(t.Context(), store.SourceLive, ended, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var del storev1.DeleteSessionResponse
+	r := call(t, st, "svc.logbook.sessions.delete", body)
+	if err := protojson.Unmarshal(r.answer, &del); err != nil || r.code != "" || del.GetSession().GetDeletedAt() == nil ||
+		del.GetDataVersion() == "" {
+		t.Errorf("delete: %s %s %s, %v", r.answer, r.code, r.desc, err)
+	}
+	var res storev1.RestoreSessionResponse
+	r = call(t, st, "svc.logbook.sessions.restore", body)
+	if err := protojson.Unmarshal(r.answer, &res); err != nil || r.code != "" || res.GetSession().GetDeletedAt() != nil ||
+		res.GetDataVersion() == del.GetDataVersion() {
+		t.Errorf("restore: %s %s %s, %v", r.answer, r.code, r.desc, err)
 	}
 }
 

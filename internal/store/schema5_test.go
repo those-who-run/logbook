@@ -27,8 +27,11 @@ const (
 	// schema7Sessions is migration 7's column: how an imported session was made
 	// (paddock#264).
 	schema7Sessions = `from_v1_rows`
-	// schema5All is every sessions column migrations 5 to 7 add.
-	schema5All = schema5Sessions + `, ` + schema5Open + `, ` + schema6More + `, ` + schema7Sessions
+	// schema8Sessions is migration 8's column: when the session was deleted
+	// (paddock ADR 0014).
+	schema8Sessions = `deleted_at`
+	// schema5All is every sessions column migrations 5 to 8 add.
+	schema5All = schema5Sessions + `, ` + schema5Open + `, ` + schema6More + `, ` + schema7Sessions + `, ` + schema8Sessions
 )
 
 // withSummary gives sess the summary ecu sends from contracts v0.2: a car, a
@@ -307,7 +310,7 @@ VALUES ('live', 's', 1, 98000, true, 50, 49, 1, 1, 600, 600, 5000, 2, 'f', '2026
 				t.Errorf("start %d: laps %q, want %q", start+1, got, before[1])
 			}
 			got := rowsOf(t, ctx, db, `SELECT `+schema5All+`, l.pit_role, l.counts_for_best FROM sessions s JOIN laps l ON l.session_id = s.id`)
-			if want := [][]string{slices.Repeat([]string{"NULL"}, 21)}; !slices.EqualFunc(got, want, slices.Equal) {
+			if want := [][]string{slices.Repeat([]string{"NULL"}, 22)}; !slices.EqualFunc(got, want, slices.Equal) {
 				t.Errorf("start %d: new columns %q, want NULL", start+1, got)
 			}
 		})

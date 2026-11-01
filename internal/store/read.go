@@ -72,6 +72,7 @@ func (s *Store) DataVersion() string {
 
 // ListSessions answers svc.logbook.sessions.list: the sessions of the sources,
 // newest first, filtered and paged, with each filter's values and counts.
+// A deleted session is left out of all of them.
 func (s *Store) ListSessions(ctx context.Context, req *storev1.ListSessionsRequest) (*storev1.ListSessionsResponse, error) {
 	if err := checkSources(req.GetSources()); err != nil {
 		return nil, err
@@ -90,7 +91,7 @@ func (s *Store) ListSessions(ctx context.Context, req *storev1.ListSessionsReque
 	}
 	out := &storev1.ListSessionsResponse{DataVersion: version, Options: &storev1.FilterCounts{}}
 	err = s.read(ctx, func(tx *sql.Tx) error {
-		with, args := sessionsOf(req.GetSources())
+		with, args := listedOf(req.GetSources())
 		all, allArgs := f.where("")
 		q := with + `SELECT count(*), count(*) FILTER (WHERE ` + all + `) FROM s`
 		if err := tx.QueryRowContext(ctx, q, append(slices.Clone(args), allArgs...)...).Scan(&out.Total, &out.Matched); err != nil {
@@ -165,7 +166,8 @@ func (s *Store) ListLaps(ctx context.Context, req *storev1.ListLapsRequest) (*st
 // ListSameTrack answers svc.logbook.sessions.same_track: the other sessions at the
 // session's track, newest first, matched by track id where the detector was sure
 // of both (track_sure, v1's sure_track_id); none when it was not sure of the
-// session's own.
+// session's own. A deleted session is never one of the others, but its own
+// same-track sessions are still answered.
 func (s *Store) ListSameTrack(ctx context.Context, req *storev1.ListSameTrackRequest) (*storev1.ListSameTrackResponse, error) {
 	if err := checkSources(req.GetSources()); err != nil {
 		return nil, err
@@ -194,7 +196,9 @@ func (s *Store) ListSameTrack(ctx context.Context, req *storev1.ListSameTrackReq
 		if err != nil {
 			return err
 		}
-		same := ` FROM s WHERE track_sure AND track_id = ? AND id <> ?`
+		// The session asked for may be deleted, and still has its track; the
+		// others are those sessions.list would list.
+		same := ` FROM s WHERE track_sure AND track_id = ? AND id <> ? AND deleted_at IS NULL`
 		args = append(args, track.Int32, row.GetSessionId())
 		if err := tx.QueryRowContext(ctx, with+`SELECT count(*)`+same, args...).Scan(&out.Matched); err != nil {
 			return err
@@ -366,6 +370,13 @@ func sessionsOf(sources []string) (string, []any) {
 `, args
 }
 
+// listedOf is sessionsOf without the deleted sessions (schema 8): those
+// sessions.list lists and counts.
+func listedOf(sources []string) (string, []any) {
+	with, args := sessionsOf(sources)
+	return strings.Replace(with, "WHERE s.src IN", "WHERE s.deleted_at IS NULL AND s.src IN", 1), args
+}
+
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ")
 }
@@ -374,7 +385,7 @@ func placeholders(n int) string {
 const rowColumns = `id, src, ended_at IS NOT NULL, end_reason, summary::VARCHAR, posted_at, last_lap,
     started_at, ended_at, kind_key, car_code, car_name, total_laps, laps_completed, started_fuel_at_start,
     joined_on_lap, fuel_capacity, best_lap, best_lap_ms, paused_ms, gaps::VARCHAR, pit_stops::VARCHAR,
-    kind::VARCHAR, track::VARCHAR, from_v1_rows`
+    kind::VARCHAR, track::VARCHAR, from_v1_rows, deleted_at`
 
 // findSession is the session id from the first of sources, in their order, that
 // has it.
@@ -406,17 +417,17 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 	defer func() { err = errors.Join(err, rows.Close()) }()
 	for rows.Next() {
 		var (
-			r                  storev1.SessionRow
-			endReason, summary sql.NullString
-			postedAt           sql.NullTime
-			lastLap            sql.NullInt32
-			fromV1Rows         sql.NullBool
-			o                  openRow
+			r                   storev1.SessionRow
+			endReason, summary  sql.NullString
+			postedAt, deletedAt sql.NullTime
+			lastLap             sql.NullInt32
+			fromV1Rows          sql.NullBool
+			o                   openRow
 		)
 		if err := rows.Scan(&r.SessionId, &r.Source, &r.Closed, &endReason, &summary, &postedAt, &lastLap,
 			&o.startedAt, &o.endedAt, &o.kind, &o.carCode, &o.carName, &o.totalLaps, &o.lapsDone, &o.fuelAtStart,
 			&o.joinedOnLap, &o.fuelCapacity, &o.bestLap, &o.bestLapMs, &o.pausedMs, &o.gaps, &o.pitStops,
-			&o.kindJSON, &o.track, &fromV1Rows); err != nil {
+			&o.kindJSON, &o.track, &fromV1Rows, &deletedAt); err != nil {
 			return nil, err
 		}
 		if endReason.Valid {
@@ -434,6 +445,9 @@ func scanRows(rows *sql.Rows) (out []*storev1.SessionRow, err error) {
 		}
 		if postedAt.Valid {
 			r.CardPostedAt = timestamppb.New(postedAt.Time.UTC())
+		}
+		if deletedAt.Valid {
+			r.DeletedAt = timestamppb.New(deletedAt.Time.UTC())
 		}
 		if lastLap.Valid {
 			r.LastLap = proto.Int32(lastLap.Int32)

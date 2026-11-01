@@ -401,7 +401,7 @@ func TestAFactThatIsNotJSONIsRefused(t *testing.T) {
 		}
 	}
 	got := rowsOf(t, t.Context(), s.index, `SELECT `+schema5All+` FROM sessions`)
-	if want := [][]string{slices.Repeat([]string{"NULL"}, 19)}; !slices.EqualFunc(got, want, slices.Equal) {
+	if want := [][]string{slices.Repeat([]string{"NULL"}, 20)}; !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("%q, want NULL", got)
 	}
 }
