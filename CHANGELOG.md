@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/those-who-run/logbook/compare/v0.1.8...v0.1.9) (2026-11-01)
+
+
+### Features
+
+* delete and restore a session, softly (schema 8) ([#35](https://github.com/those-who-run/logbook/issues/35)) ([4a62f8e](https://github.com/those-who-run/logbook/commit/4a62f8e91944f09e94345a303fc13a2e7af1eec8))
+
 ## [0.1.8](https://github.com/those-who-run/logbook/compare/v0.1.7...v0.1.8) (2026-11-01)
 
 
