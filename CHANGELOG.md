@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/those-who-run/logbook/compare/v0.1.7...v0.1.8) (2026-11-01)
+
+
+### Features
+
+* logbook import-v1 brings v1's history into the store ([#33](https://github.com/those-who-run/logbook/issues/33)) ([8b4c422](https://github.com/those-who-run/logbook/commit/8b4c422d4d5a3148f2f7baae460abc2b15a18759))
+
 ## [0.1.7](https://github.com/those-who-run/logbook/compare/v0.1.6...v0.1.7) (2026-10-31)
 
 
