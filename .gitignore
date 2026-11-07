@@ -9,3 +9,6 @@ __pycache__/
 !.claude/hooks/
 .claude/hooks/*
 !.claude/hooks/guard.py
+# Tracked: the copies of those-who-run/.github's agent/ files that its agent/copies.json lists.
+!.claude/agents/
+!.claude/skills/
