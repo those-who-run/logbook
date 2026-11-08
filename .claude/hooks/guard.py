@@ -1087,17 +1087,20 @@ def secret_args(name: str, args: list[str], env: dict[str, str]) -> Verdict:
 
 # The maintainer's own jobs in those-who-run/.github: the make targets in its Makefile's
 # "Maintainer only" group and the scripts behind them. They run with the gh login of
-# whoever runs them, change repository settings and the organisation's project board,
-# and one stores the release App's private key, so agents never run them, not even the
-# read-only checks. Reading or linting a script is fine; running it is not.
+# whoever runs them, change repository settings, labels and the organisation's project
+# board, and one stores the release App's private key, so agents never run them, not
+# even the read-only checks. Reading or linting a script is fine; running it is not.
 MAINTAINER_ONLY = (
     "it is the maintainer's own job, run with his gh login: it reads or changes "
     "repository settings, the project board or the release App's key"
 )
 MAINTAINER_TARGETS = {
     "board", "board-check", "protect", "protect-check", "envs", "envs-check", "new-repo-check",
+    "labels", "labels-check",
 }  # fmt: skip
-MAINTAINER_SCRIPTS = {"protect-repo.sh", "board-sync.sh", "release-envs.sh", "new-repo-check.sh"}
+MAINTAINER_SCRIPTS = {
+    "protect-repo.sh", "board-sync.sh", "release-envs.sh", "new-repo-check.sh", "labels.sh",
+}  # fmt: skip
 # make's options that take a separate value.
 MAKE_WITH_VALUE = {
     "-C", "-f", "-I", "-o", "-W", "-E", "--directory", "--file", "--makefile",
