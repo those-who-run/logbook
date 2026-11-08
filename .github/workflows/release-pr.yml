@@ -42,7 +42,7 @@ jobs:
       # too: GitHub refuses to start a reusable workflow whose jobs ask for more
       # than the caller grants, whether or not those jobs would run.
       actions: write
-    uses: those-who-run/.github/.github/workflows/release-please.yml@362c90b9ab9d07174dcf1892726d62ee084df450 # v0.2.16
+    uses: those-who-run/.github/.github/workflows/release-please.yml@383a94751f82cef93c6babdc99526b4133eb0f55 # v0.2.17
     with:
       # Dispatched on the new tag; empty for a repository with nothing to publish.
       release-workflow: release.yml
