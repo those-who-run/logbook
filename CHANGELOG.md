@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/those-who-run/logbook/compare/v0.1.9...v0.1.10) (2026-11-12)
+
+
+### Dependencies
+
+* Go 1.27.4 ([#41](https://github.com/those-who-run/logbook/issues/41)) ([b12f4c9](https://github.com/those-who-run/logbook/commit/b12f4c99fc99258277489b7d05fec81c93aef887))
+
 ## [0.1.9](https://github.com/those-who-run/logbook/compare/v0.1.8...v0.1.9) (2026-11-01)
 
 
