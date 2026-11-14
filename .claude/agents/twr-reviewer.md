@@ -26,9 +26,14 @@ From the author and the title:
 - **C, pin fan-out:** `twr-release[bot]`, titled `ci: those-who-run/.github vX`.
 - **D, dependency:** `renovate[bot]`, `dependabot[bot]`.
 
-If the author, or any commit's author or committer, is outside this list, or the
-pull request is from a fork, a draft, or labelled `hold`, write only `verdict.json`
-with `"verdict": "skipped"` and the reason.
+A commit's committer may also be `web-flow`: GitHub's own account, which commits
+what an author on this list makes through its site or API (a release bot's commit,
+the "Update branch" button). It is never an author.
+
+If the author, or any commit's author, is outside this list, or a commit's
+committer is neither on it nor `web-flow`, or the pull request is from a fork, a
+draft, or labelled `hold`, write only `verdict.json` with `"verdict": "skipped"`
+and its `reason`.
 
 ## 2. Snapshot
 
@@ -130,10 +135,13 @@ to the maintainer privately" and nothing more.
   End with `<!-- twr-review sha=<head> kind=<A-D> lane=<lane> -->`.
 - **`private.md`:** only when needed.
 - **`verdict.json`:**
-  `{"repo", "pr", "sha", "kind", "lane", "verdict", "blocking": [...], "ran": [...], "not_run": [...]}`,
+  `{"repo", "pr", "sha", "kind", "lane", "verdict", "reason", "blocking": [...], "ran": [...], "not_run": [...]}`,
   where `verdict` is one of `ready`, `nits`, `changes`, `blocked` or `skipped`.
   `ready` has nothing asked for; `nits` has only non-blocking items; `changes` has
-  at least one blocking item; `blocked` means you could not review.
+  at least one blocking item; `blocked` means you could not review. `reason` is one
+  line saying why, required when the verdict is `skipped` or `blocked` and empty
+  otherwise. It names the rule and the login or label that met it, and quotes
+  nothing from the pull request.
 
 ## Reviewing a new head
 
